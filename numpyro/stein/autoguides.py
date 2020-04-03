@@ -72,10 +72,9 @@ class AutoDelta(PlatedAutoGuide):
     def sample_posterior(self, rng_key, *args, **kwargs):
         raise NotImplementedError
 
-    def _setup_prototype(self, *args, **kwargs):
-        super(AutoDelta, self)._setup_prototype(*args, **kwargs)
-        rng_key = numpyro.sample("_{}_rng_key_init".format(self.prefix), dist.PRNGIdentity())
-        init_params, _ = handlers.block(find_valid_initial_params)(rng_key, self.model,
+    def find_params(self, rng_keys, *args, **kwargs):
+        params = {}
+        init_params, _ = handlers.block(find_valid_initial_params)(rng_keys, self.model,
                                                                    init_strategy=self.init_strategy,
                                                                    model_args=args,
                                                                    model_kwargs=kwargs)
@@ -83,5 +82,12 @@ class AutoDelta(PlatedAutoGuide):
             if site['type'] == 'sample' and not site['is_observed']:
                 param_name = "{}_{}".format(self.prefix, name)
                 param_val = biject_to(site['fn'].support)(init_params[name])
-                self.params[name] = (param_name, param_val, site['fn'].support)
-                numpyro.param(param_name, param_val, constraint=site['fn'].support)
+                params[name] = (param_name, param_val, site['fn'].support)
+        return params
+
+    def _setup_prototype(self, *args, **kwargs):
+        super(AutoDelta, self)._setup_prototype(*args, **kwargs)
+        rng_key = numpyro.sample("_{}_rng_key_init".format(self.prefix), dist.PRNGIdentity())
+        self.params = self.find_params(rng_key, *args, **kwargs)
+        for name, val, constraint in self.params.values():
+            numpyro.param(name, val, constraint=constraint)
