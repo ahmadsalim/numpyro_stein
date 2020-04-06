@@ -12,11 +12,13 @@ class PlatedAutoGuide(AutoGuide):
     def __init__(self, model, *, prefix='auto', create_plates=None):
         self.create_plates = create_plates
         self._prototype_frames = {}
+        self._param_map = None
+        self.init_params = None
         super(PlatedAutoGuide, self).__init__(model, prefix=prefix)
 
     def _setup_prototype(self, *args, **kwargs):
         super(PlatedAutoGuide, self)._setup_prototype(*args, **kwargs)
-        for name, site in self.prototype_trace.items():
+        for _, site in self.prototype_trace.items():
             if site['type'] != 'sample' or site['is_observed']:
                 continue
             for frame in site['cond_indep_stack']:
@@ -61,7 +63,7 @@ class AutoDelta(PlatedAutoGuide):
                     event_ndim = len(site['fn'].base_dist.event_shape)
                 else:
                     event_ndim = len(site['fn'].event_shape)
-                param_name, param_val, constraint = self.params[name]
+                param_name, param_val, constraint = self._param_map[name]
                 val_param = numpyro.param(param_name, param_val, constraint=constraint)
                 result[name] = numpyro.sample(name, dist.Delta(val_param, event_ndim=event_ndim))
         return result
@@ -83,11 +85,10 @@ class AutoDelta(PlatedAutoGuide):
                 param_name = "{}_{}".format(self.prefix, name)
                 param_val = biject_to(site['fn'].support)(init_params[name])
                 params[name] = (param_name, param_val, site['fn'].support)
-        return params
+        self._param_map = params
+        self.init_params = {param: (val, constr) for param, val, constr in self._param_map.values()}
 
     def _setup_prototype(self, *args, **kwargs):
         super(AutoDelta, self)._setup_prototype(*args, **kwargs)
         rng_key = numpyro.sample("_{}_rng_key_init".format(self.prefix), dist.PRNGIdentity())
-        self.params = self.find_params(rng_key, *args, **kwargs)
-        for name, val, constraint in self.params.values():
-            numpyro.param(name, val, constraint=constraint)
+        self.find_params(rng_key, *args, **kwargs)
