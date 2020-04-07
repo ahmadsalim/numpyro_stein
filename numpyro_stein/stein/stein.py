@@ -3,8 +3,8 @@ from numpyro import handlers
 from numpyro.distributions import constraints
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import transform_fn, log_density
-from .autoguides import AutoDelta
-from ..util import ravel_pytree
+from numpyro_stein.stein.autoguides import AutoDelta
+from numpyro_stein.util import ravel_pytree
 
 import jax
 import jax.random
@@ -45,7 +45,7 @@ class SVGD(object):
         model_uparams = {p: v for p, v in unconstr_params.items() if p not in self.guide_param_names}
         guide_uparams = {p: v for p, v in unconstr_params.items() if p in self.guide_param_names}
         # 1. Collect each guide parameter into monolithic particles that capture correlations between parameter values across each individual particle
-        guide_particles, unravel_pytree = ravel_pytree(guide_uparams, batch_dims=1)
+        guide_particles, unravel_pytree, unravel_pytree_batched = ravel_pytree(guide_uparams, batch_dims=1)
         # 2. Calculate log-joint-prob and gradients for each parameter (broadcasting by num_loss_particles for increased variance reduction)
         def log_joint_prob(rng_key, model_params, guide_params):
             params = {**model_params, **guide_params}
@@ -63,21 +63,26 @@ class SVGD(object):
             else:
                 rng_keys = jax.random.split(rng_key, self.num_loss_particles)
                 return np.mean(jax.vmap(single_particle_ljp)(rng_keys))
-        jfp_fn = lambda rks, mps, gps: jax.vmap(lambda rk, gps: log_joint_prob(rk, mps, gps))(rks, gps)
         rng_keys = jax.random.split(rng_key, self.num_stein_particles)
-        loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
-        model_param_grads = jax.grad(lambda mps: jfp_fn(rng_keys, self.constrain_fn(mps), self.constrain_fn(guide_uparams)))(model_uparams)
+        # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
+        loss, particle_ljp_grads = jax.vmap(lambda rk, ps: jax.value_and_grad(lambda ps: 
+                                              log_joint_prob(rk, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, guide_particles)
+        model_param_grads = jax.vmap(lambda rk, ps: jax.grad(lambda mps: 
+                                            log_joint_prob(rk, self.constrain_fn(mps), self.constrain_fn(unravel_pytree(ps))))(model_uparams))(rng_keys, guide_particles)
+        model_param_grads = tree_map(jax.partial(np.mean, axis=0), model_param_grads)
         # 3. Calculate kernel on monolithic particle
         log_kernel = self.log_kernel_fn(guide_particles)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
-        attractive_force = jax.vmap(lambda x, x_ljp_grad: np.sum(jax.vmap(lambda y: log_kernel(x, y)*x_ljp_grad)(guide_particles), axis=0))(guide_particles, particle_ljp_grads)
-        repulsive_force = jax.vmap(lambda x: np.sum(jax.vmap(lambda y: jax.grad(jax.partial(log_kernel, x))(y))(guide_particles), axis=0))(guide_particles)
+        attractive_force = jax.vmap(lambda x, x_ljp_grad: np.sum(jax.vmap(lambda y: np.exp(log_kernel(x, y)) *x_ljp_grad)(guide_particles), axis=0))(guide_particles, particle_ljp_grads)
+        repulsive_force = jax.vmap(lambda x: np.sum(jax.vmap(lambda y:
+                                jax.vmap(lambda xd, yd: jax.grad(jax.partial(log_kernel, xd))(yd))(x, y))
+                                        (guide_particles), axis=0))(guide_particles)
         particle_grads = attractive_force + repulsive_force
         # 5. Decompose the monolithic particle forces back to concrete parameter values
-        guide_param_grads = unravel_pytree(particle_grads)
+        guide_param_grads = unravel_pytree_batched(particle_grads)
         # 6. Return loss and gradients (based on parameter forces)
         res_grads = tree_map(lambda x: -x, {**model_param_grads, **guide_param_grads})
-        return -loss, res_grads
+        return -np.mean(loss), res_grads
 
     
     def init(self, rng_key, *args, **kwargs):
@@ -94,7 +99,8 @@ class SVGD(object):
         guide_init = handlers.seed(self.guide, guide_seed)
         guide_trace = handlers.trace(guide_init).get_trace(*args, **kwargs, **self.static_kwargs)
         model_trace = handlers.trace(model_init).get_trace(*args, **kwargs, **self.static_kwargs)
-        rng_key, particle_seeds = jax.random.split(rng_key, 1 + self.num_stein_particles)
+        rng_key, particle_seed = jax.random.split(rng_key)
+        particle_seeds = jax.random.split(particle_seed, num=self.num_stein_particles)
         self.guide.find_params(particle_seeds, *args, **kwargs, **self.static_kwargs) # Get parameter values for each particle
         params = {}
         inv_transforms = {}
@@ -105,10 +111,13 @@ class SVGD(object):
                 constraint = site['kwargs'].pop('constraint', constraints.real)
                 transform = biject_to(constraint)
                 inv_transforms[site['name']] = transform
-                pval = self.guide.init_params.get(site['name'], site['value'])
+                if site['name'] in self.guide.init_params:
+                    pval, _ = self.guide.init_params[site['name']]
+                else:
+                    pval =  site['value']
                 params[site['name']] = transform.inv(pval)
-                if site['name'] not in model_trace:
-                    guide_param_names.update(site['name'])
+                if site['name'] in guide_trace:
+                    guide_param_names.add(site['name'])
         self.guide_param_names = guide_param_names
         self.constrain_fn = jax.partial(transform_fn, inv_transforms)
         return SVGDState(self.optim.init(params), rng_key)
@@ -154,3 +163,30 @@ class SVGD(object):
         loss_val, _ = self._svgd_loss_and_grads(rng_key_eval, params, 
                                                 *args, **kwargs, **self.static_kwargs)
         return loss_val
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    import numpyro
+    import numpyro.distributions as dist
+    import numpyro_stein.stein.kernels as kernels
+    from numpyro.infer.util import find_valid_initial_params, init_to_median
+    rng_key = jax.random.PRNGKey(1337)
+    rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
+    num_data = 10000
+    num_iterations = 500
+    choices = jax.random.bernoulli(data_key1, 2 / 3, shape=(num_data,))
+    data = np.take_along_axis(np.stack([-2 + jax.random.normal(data_key2, shape=(num_data,)), 2 + jax.random.normal(data_key3, shape=(num_data,))], axis=0), 
+                              np.expand_dims(choices.astype('int32'), axis=0), axis=0)
+    def model(data):
+        mu_loc = numpyro.param('mu_loc', -10.)
+        mu = numpyro.sample('mu', dist.Normal(loc=mu_loc))
+        with numpyro.plate('data', size=data.shape[0]):
+            numpyro.sample('obs', dist.Normal(loc=mu), obs=data)
+
+    guide = AutoDelta(model, init_strategy=init_to_median())
+    svgd = SVGD(model, guide, numpyro.optim.Adam(step_size=1e-3), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=1)
+    svgd_state = svgd.init(rng_key, data)
+    for i in range(100):
+        svgd_state, loss = svgd.update(svgd_state, data)
+        print(loss)
+    print(svgd.get_params(svgd_state))
