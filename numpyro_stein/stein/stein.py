@@ -73,11 +73,10 @@ class SVGD(object):
         # 3. Calculate kernel on monolithic particle
         log_kernel = self.log_kernel_fn(guide_particles)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
-        attractive_force = jax.vmap(lambda x, x_ljp_grad: np.sum(jax.vmap(lambda y: np.exp(log_kernel(x, y)) *x_ljp_grad)(guide_particles), axis=0))(guide_particles, particle_ljp_grads)
-        repulsive_force = jax.vmap(lambda x: np.sum(jax.vmap(lambda y:
-                                jax.vmap(lambda xd, yd: jax.grad(jax.partial(log_kernel, xd))(yd))(x, y))
-                                        (guide_particles), axis=0))(guide_particles)
-        particle_grads = attractive_force + repulsive_force
+        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: np.exp(log_kernel(x, y)) * x_ljp_grad)(guide_particles, particle_ljp_grads), axis=0) )(guide_particles)
+        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: 
+                            jax.grad(lambda x: np.exp(log_kernel(x, y)))(x))(guide_particles), axis=0))(guide_particles)
+        particle_grads = (attractive_force + repulsive_force)
         # 5. Decompose the monolithic particle forces back to concrete parameter values
         guide_param_grads = unravel_pytree_batched(particle_grads)
         # 6. Return loss and gradients (based on parameter forces)
@@ -170,23 +169,28 @@ if __name__ == "__main__":
     import numpyro.distributions as dist
     import numpyro_stein.stein.kernels as kernels
     from numpyro.infer.util import find_valid_initial_params, init_to_median
-    rng_key = jax.random.PRNGKey(1337)
+    rng_key = jax.random.PRNGKey(35)
     rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
-    num_data = 10000
+    num_data = 100000
     num_iterations = 500
     choices = jax.random.bernoulli(data_key1, 2 / 3, shape=(num_data,))
     data = np.take_along_axis(np.stack([-2 + jax.random.normal(data_key2, shape=(num_data,)), 2 + jax.random.normal(data_key3, shape=(num_data,))], axis=0), 
                               np.expand_dims(choices.astype('int32'), axis=0), axis=0)
     def model(data):
-        mu_loc = numpyro.param('mu_loc', -10.)
-        mu = numpyro.sample('mu', dist.Normal(loc=mu_loc))
+        mu = numpyro.sample('mu', dist.Normal(-10, scale=1.0))
         with numpyro.plate('data', size=data.shape[0]):
-            numpyro.sample('obs', dist.Normal(loc=mu), obs=data)
+            numpyro.sample('obs', dist.Normal(loc=mu, scale=0.001), obs=data)
 
     guide = AutoDelta(model, init_strategy=init_to_median())
-    svgd = SVGD(model, guide, numpyro.optim.Adam(step_size=1e-3), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=1)
+    svgd = SVGD(model, guide, numpyro.optim.Adam(step_size=0.1), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
     svgd_state = svgd.init(rng_key, data)
-    for i in range(100):
+    for i in range(500):
         svgd_state, loss = svgd.update(svgd_state, data)
-        print(loss)
+        if i % 10 == 0:
+            plt.clf()
+            plt.hist(svgd.get_params(svgd_state)['auto_mu'], bins=50, density=True)
+            plt.hist(data, bins=50, density=True)
+            plt.show(block=False)
+            plt.pause(0.01)
+            print(loss)
     print(svgd.get_params(svgd_state))
