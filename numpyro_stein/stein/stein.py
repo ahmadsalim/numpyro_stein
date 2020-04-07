@@ -177,9 +177,9 @@ if __name__ == "__main__":
     data = np.take_along_axis(np.stack([-2 + jax.random.normal(data_key2, shape=(num_data,)), 2 + jax.random.normal(data_key3, shape=(num_data,))], axis=0), 
                               np.expand_dims(choices.astype('int32'), axis=0), axis=0)
     def model(data):
-        mu = numpyro.sample('mu', dist.Normal(-10, scale=1.0))
+        mu = numpyro.sample('mu', dist.Normal(0.0, scale=1.0))
         with numpyro.plate('data', size=data.shape[0]):
-            numpyro.sample('obs', dist.Normal(loc=mu, scale=0.001), obs=data)
+            numpyro.sample('obs', dist.Normal(loc=mu, scale=0.1), obs=data)
 
     guide = AutoDelta(model, init_strategy=init_to_median())
     svgd = SVGD(model, guide, numpyro.optim.Adam(step_size=0.1), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
