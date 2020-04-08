@@ -6,6 +6,7 @@ from numpyro.infer.util import transform_fn, log_density
 from numpyro_stein.stein.autoguides import AutoDelta
 from numpyro_stein.util import ravel_pytree, init_to_noisy_median
 from numpyro_stein.distributions.flat import Flat
+from numpyro_stein.distributions.normal_mixture_distribution import NormalMixture
 
 import jax
 import jax.random
@@ -75,7 +76,7 @@ class SVGD(object):
         log_kernel = self.log_kernel_fn(guide_particles)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
         attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: np.exp(log_kernel(x, y)) * x_ljp_grad)(guide_particles, particle_ljp_grads), axis=0) )(guide_particles)
-        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: 
+        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: jax.grad(lambda x: np.exp(log_kernel(x, y)))(x))(guide_particles), axis=0))(guide_particles)
         particle_grads = (attractive_force + repulsive_force) / self.num_stein_particles
         # 5. Decompose the monolithic particle forces back to concrete parameter values
         guide_param_grads = unravel_pytree_batched(particle_grads)
