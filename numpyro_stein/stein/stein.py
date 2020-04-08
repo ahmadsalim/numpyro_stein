@@ -170,33 +170,29 @@ if __name__ == "__main__":
     import numpyro.distributions as dist
     import numpyro_stein.stein.kernels as kernels
     import seaborn as sns
-    rng_key = jax.random.PRNGKey(35)
+    rng_key = jax.random.PRNGKey(1356)
     rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
-    num_data = 1024
+    num_data = 500
     batch_size = 128
-    num_iterations = 500
+    num_iterations = 15000
     choices = jax.random.bernoulli(data_key1, 2 / 3, shape=(num_data,))
     data = np.take_along_axis(np.stack([-2 + jax.random.normal(data_key2, shape=(num_data,)), 2 + jax.random.normal(data_key3, shape=(num_data,))], axis=0), 
                               np.expand_dims(choices.astype('int32'), axis=0), axis=0)[0, :]
     def model(data):
-        mu = numpyro.sample('mu', Flat(-10.0))
-        with numpyro.plate('data', size=data.shape[0]):
-            numpyro.sample('obs', dist.Normal(loc=mu, scale=1e-3), obs=data)
+        mu = numpyro.sample('mu', Flat(-3.0))
+        log_sigma = numpyro.sample('log_sigma', Flat(0.0))
+        with numpyro.plate('data', size=data.shape[0], subsample_size=batch_size):
+            numpyro.sample('obs', dist.Normal(loc=mu, scale=np.exp(log_sigma)), obs=data)
 
     guide = AutoDelta(model, init_strategy=init_to_noisy_median(noise_scale=1.0))
-    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1e-3), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
-    svgd_state = svgd.init(rng_key, data[0:batch_size])
+    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1e-1), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
+    svgd_state = svgd.init(rng_key, data)
     for i in range(num_iterations):
-        loss = 0.0
-        num_batches = int(num_data / batch_size)
-        for j in range(num_batches):
-            batch = data[j*batch_size:(j+1)*batch_size]
-            svgd_state, mb_loss = svgd.update(svgd_state, batch)
-            loss = loss + mb_loss
-        if i % 10 == 0:
+        svgd_state, loss = svgd.update(svgd_state, data)
+        if i % 100 == 0:
             plt.clf()
-            sns.kdeplot(svgd.get_params(svgd_state)['auto_mu'])
-            plt.hist(data, bins=50, density=True)
+            plt.hist(data, bins=100, density=True)
+            plt.hist(svgd.get_params(svgd_state)['auto_mu'], bins=30, density=True)
             plt.show(block=False)
             plt.pause(0.01)
             print(loss)
