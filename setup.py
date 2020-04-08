@@ -17,5 +17,6 @@ setuptools.setup(
         "License :: OSI Approved :: Apache License 2.0",
         "Operating System :: OS Independent",
     ],
+    install_requires=["numpyro", "matplotlib", "seaborn"],
     python_requires='>=3.6',
 )

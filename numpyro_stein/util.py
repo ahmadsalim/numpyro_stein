@@ -5,6 +5,11 @@ from jax import lax
 from jax.dtypes import canonicalize_dtype
 from jax.tree_util import tree_flatten, tree_map, tree_unflatten
 
+import numpyro
+from numpyro.infer.util import init_to_median
+import numpyro.distributions as dist
+from numpyro.distributions.transforms import biject_to
+
 pytree_metadata = namedtuple('pytree_metadata', ['flat', 'shape', 'event_size', 'dtype'])
 
 
@@ -39,3 +44,18 @@ def ravel_pytree(pytree, *, batch_dims=0):
         return tree_unflatten(treedef, unravel_list_batched(arr))
 
     return flat, unravel_pytree, unravel_pytree_batched
+
+def init_to_noisy_median(num_samples=15, noise_scale=1.0):
+    def init(site, skip_param=False):
+        if isinstance(site['fn'], dist.TransformedDistribution):
+            fn = site['fn'].base_dist
+        else:
+            fn = site['fn']
+        init_fn = init_to_median(num_samples=num_samples)
+        vals = init_fn(site, skip_param=False)
+        if vals is not None:
+            base_transform = biject_to(fn.support)
+            unconstrained_init = numpyro.sample('_noisy_init', dist.Normal(loc=base_transform.inv(vals), scale=noise_scale))
+            return base_transform(unconstrained_init)
+    return init
+        
