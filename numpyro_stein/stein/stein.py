@@ -172,21 +172,27 @@ if __name__ == "__main__":
     import seaborn as sns
     rng_key = jax.random.PRNGKey(35)
     rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
-    num_data = 1_000_000
+    num_data = 1024
+    batch_size = 128
     num_iterations = 500
     choices = jax.random.bernoulli(data_key1, 2 / 3, shape=(num_data,))
     data = np.take_along_axis(np.stack([-2 + jax.random.normal(data_key2, shape=(num_data,)), 2 + jax.random.normal(data_key3, shape=(num_data,))], axis=0), 
-                              np.expand_dims(choices.astype('int32'), axis=0), axis=0)
+                              np.expand_dims(choices.astype('int32'), axis=0), axis=0)[0, :]
     def model(data):
         mu = numpyro.sample('mu', Flat(-10.0))
         with numpyro.plate('data', size=data.shape[0]):
             numpyro.sample('obs', dist.Normal(loc=mu, scale=1e-3), obs=data)
 
     guide = AutoDelta(model, init_strategy=init_to_noisy_median(noise_scale=1.0))
-    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), kernels.rbf_kernel, num_stein_particles=10, num_loss_particles=3)
-    svgd_state = svgd.init(rng_key, data)
+    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1e-3), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
+    svgd_state = svgd.init(rng_key, data[0:batch_size])
     for i in range(num_iterations):
-        svgd_state, loss = svgd.update(svgd_state, data)
+        loss = 0.0
+        num_batches = int(num_data / batch_size)
+        for j in range(num_batches):
+            batch = data[j*batch_size:(j+1)*batch_size]
+            svgd_state, mb_loss = svgd.update(svgd_state, batch)
+            loss = loss + mb_loss
         if i % 10 == 0:
             plt.clf()
             sns.kdeplot(svgd.get_params(svgd_state)['auto_mu'])
