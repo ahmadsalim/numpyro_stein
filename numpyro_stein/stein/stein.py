@@ -23,6 +23,8 @@ class SVGD(object):
     :param guide: Python callable with Pyro primitives for the guide
         (recognition network).
     :param optim: an instance of :class:`~numpyro.optim._NumpyroOptim`.
+    :param loss: ELBO loss, i.e. negative Evidence Lower Bound, to minimize.
+    :param log_kernel_fn: Function that produces a logarithm of the statistical kernel to use with Stein inference
     :param num_stein_particles: number of particles for Stein inference.
         (More particles capture more of the posterior distribution)
     :param num_loss_particles: number of particles to evaluate the loss.
@@ -30,11 +32,12 @@ class SVGD(object):
     :param static_kwargs: static arguments for the model / guide, i.e. arguments
         that remain constant during fitting.
     """
-    def __init__(self, model, guide, optim, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, scale_factor=1.0, **static_kwargs):
+    def __init__(self, model, guide, optim, loss, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, scale_factor=1.0, **static_kwargs):
         assert isinstance(guide, AutoDelta) # Only AutoDelta guide supported for now
         self.model = model
         self.guide = guide
         self.optim = optim
+        self.loss = loss
         self.log_kernel_fn = log_kernel_fn
         self.static_kwargs = static_kwargs
         self.num_stein_particles = num_stein_particles
@@ -49,29 +52,19 @@ class SVGD(object):
         guide_uparams = {p: v for p, v in unconstr_params.items() if p in self.guide_param_names}
         # 1. Collect each guide parameter into monolithic particles that capture correlations between parameter values across each individual particle
         guide_particles, unravel_pytree, unravel_pytree_batched = ravel_pytree(guide_uparams, batch_dims=1)
-        # 2. Calculate log-joint-prob and gradients for each parameter (broadcasting by num_loss_particles for increased variance reduction)
-        def log_joint_prob(rng_key, model_params, guide_params):
+
+        # 2. Calculate loss and gradients for each parameter (broadcasting by num_loss_particles for increased variance reduction)
+        def scaled_loss(rng_key, model_params, guide_params):
             params = {**model_params, **guide_params}
-            def single_particle_ljp(rng_key):
-                model_seed, guide_seed = jax.random.split(rng_key)
-                seeded_model = handlers.seed(self.model, model_seed)
-                seeded_guide = handlers.seed(self.guide, guide_seed)
-                _, guide_trace = log_density(seeded_guide, args, kwargs, params)
-                seeded_model = handlers.replay(seeded_model, guide_trace)
-                model_log_density, _ = log_density(seeded_model, args, kwargs, params)
-                return self.scale_factor * model_log_density
-        
-            if self.num_loss_particles == 1:
-                return single_particle_ljp(rng_key)
-            else:
-                rng_keys = jax.random.split(rng_key, self.num_loss_particles)
-                return np.mean(jax.vmap(single_particle_ljp)(rng_keys))
+            loss_val = self.loss.loss(rng_key, params, self.model, self.guide, *args, **kwargs, **self.static_kwargs)
+            return - self.scale_factor * loss_val
+
         rng_keys = jax.random.split(rng_key, self.num_stein_particles)
         # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
         loss, particle_ljp_grads = jax.vmap(lambda rk, ps: jax.value_and_grad(lambda ps: 
-                                            log_joint_prob(rk, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, guide_particles)
+                                            scaled_loss(rk, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, guide_particles)
         model_param_grads = jax.vmap(lambda rk, ps: jax.grad(lambda mps: 
-                                            log_joint_prob(rk, self.constrain_fn(mps), self.constrain_fn(unravel_pytree(ps))))(model_uparams))(rng_keys, guide_particles)
+                                            scaled_loss(rk, self.constrain_fn(mps), self.constrain_fn(unravel_pytree(ps))))(model_uparams))(rng_keys, guide_particles)
         model_param_grads = tree_map(jax.partial(np.mean, axis=0), model_param_grads)
         # 3. Calculate kernel on monolithic particle
         log_kernel = self.log_kernel_fn(guide_particles)
@@ -170,6 +163,7 @@ if __name__ == "__main__":
     import numpyro
     import numpyro.distributions as dist
     import numpyro_stein.stein.kernels as kernels
+    from numpyro.infer import ELBO
     from numpyro.infer.util import init_to_value
     import seaborn as sns
     rng_key = jax.random.PRNGKey(1356)
@@ -179,7 +173,7 @@ if __name__ == "__main__":
         numpyro.sample('x', NormalMixture(np.array([1/3, 2/3]), np.array([-2., 2.]), np.array([1., 1.])))
 
     guide = AutoDelta(model, init_strategy=init_with_noise(init_to_value({'x': -10.}), noise_scale=1.0))
-    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
+    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), ELBO(), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
     svgd_state = svgd.init(rng_key)
     sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
     plt.savefig('initial_svgd.png')
