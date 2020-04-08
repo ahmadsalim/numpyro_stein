@@ -4,7 +4,7 @@ from numpyro.distributions import constraints
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import transform_fn, log_density
 from numpyro_stein.stein.autoguides import AutoDelta
-from numpyro_stein.util import ravel_pytree, init_to_noisy_median
+from numpyro_stein.util import ravel_pytree, init_with_noise
 from numpyro_stein.distributions.flat import Flat
 from numpyro_stein.distributions.normal_mixture_distribution import NormalMixture
 
@@ -30,7 +30,7 @@ class SVGD(object):
     :param static_kwargs: static arguments for the model / guide, i.e. arguments
         that remain constant during fitting.
     """
-    def __init__(self, model, guide, optim, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, **static_kwargs):
+    def __init__(self, model, guide, optim, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, scale_factor=1.0, **static_kwargs):
         assert isinstance(guide, AutoDelta) # Only AutoDelta guide supported for now
         self.model = model
         self.guide = guide
@@ -39,6 +39,7 @@ class SVGD(object):
         self.static_kwargs = static_kwargs
         self.num_stein_particles = num_stein_particles
         self.num_loss_particles = num_loss_particles
+        self.scale_factor = scale_factor
         self.guide_param_names = None
         self.constrain_fn = None
 
@@ -58,7 +59,7 @@ class SVGD(object):
                 _, guide_trace = log_density(seeded_guide, args, kwargs, params)
                 seeded_model = handlers.replay(seeded_model, guide_trace)
                 model_log_density, _ = log_density(seeded_model, args, kwargs, params)
-                return model_log_density
+                return self.scale_factor * model_log_density
         
             if self.num_loss_particles == 1:
                 return single_particle_ljp(rng_key)
@@ -68,7 +69,7 @@ class SVGD(object):
         rng_keys = jax.random.split(rng_key, self.num_stein_particles)
         # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
         loss, particle_ljp_grads = jax.vmap(lambda rk, ps: jax.value_and_grad(lambda ps: 
-                                              log_joint_prob(rk, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, guide_particles)
+                                            log_joint_prob(rk, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, guide_particles)
         model_param_grads = jax.vmap(lambda rk, ps: jax.grad(lambda mps: 
                                             log_joint_prob(rk, self.constrain_fn(mps), self.constrain_fn(unravel_pytree(ps))))(model_uparams))(rng_keys, guide_particles)
         model_param_grads = tree_map(jax.partial(np.mean, axis=0), model_param_grads)
@@ -169,31 +170,23 @@ if __name__ == "__main__":
     import numpyro
     import numpyro.distributions as dist
     import numpyro_stein.stein.kernels as kernels
+    from numpyro.infer.util import init_to_value
     import seaborn as sns
     rng_key = jax.random.PRNGKey(1356)
     rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
-    num_data = 500
-    batch_size = 128
-    num_iterations = 15000
-    choices = jax.random.bernoulli(data_key1, 2 / 3, shape=(num_data,))
-    data = np.take_along_axis(np.stack([-2 + jax.random.normal(data_key2, shape=(num_data,)), 2 + jax.random.normal(data_key3, shape=(num_data,))], axis=0), 
-                              np.expand_dims(choices.astype('int32'), axis=0), axis=0)[0, :]
-    def model(data):
-        mu = numpyro.sample('mu', Flat(-3.0))
-        log_sigma = numpyro.sample('log_sigma', Flat(0.0))
-        with numpyro.plate('data', size=data.shape[0], subsample_size=batch_size):
-            numpyro.sample('obs', dist.Normal(loc=mu, scale=np.exp(log_sigma)), obs=data)
+    num_iterations = 1500
+    def model():
+        numpyro.sample('x', NormalMixture(np.array([1/3, 2/3]), np.array([-2., 2.]), np.array([1., 1.])))
 
-    guide = AutoDelta(model, init_strategy=init_to_noisy_median(noise_scale=1.0))
-    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1e-1), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
-    svgd_state = svgd.init(rng_key, data)
+    guide = AutoDelta(model, init_strategy=init_with_noise(init_to_value({'x': -10.}), noise_scale=1.0))
+    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
+    svgd_state = svgd.init(rng_key)
+    sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
+    plt.savefig('initial_svgd.png')
     for i in range(num_iterations):
-        svgd_state, loss = svgd.update(svgd_state, data)
+        svgd_state, loss = svgd.update(svgd_state)
         if i % 100 == 0:
-            plt.clf()
-            plt.hist(data, bins=100, density=True)
-            plt.hist(svgd.get_params(svgd_state)['auto_mu'], bins=30, density=True)
-            plt.show(block=False)
-            plt.pause(0.01)
             print(loss)
+    sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
+    plt.savefig('final_svgd.png')
     print(svgd.get_params(svgd_state))
