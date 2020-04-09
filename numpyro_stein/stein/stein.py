@@ -14,8 +14,6 @@ import jax.numpy as np
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Allow scaling of log-probability, and non-linearity to repulsive force
-# * Allow some guide parameters to optimized clasically (no Stein), e.g. global transformations/neural networks
 # * Implement multivariate RBF kernel support
 # * Implement IMQ kernel like in Pyro (Measuring Sample Quality)
 # * Implement linear and random kernel
@@ -40,10 +38,15 @@ class SVGD(object):
         (More particles capture more of the posterior distribution)
     :param num_loss_particles: number of particles to evaluate the loss.
         (More loss particles reduce variance of loss estimates for each Stein particle)
+    :param loss_temperature: scaling of loss factor
+    :param repulsion_temperature: scaling of repulsive forces (Non-linear SVGD)
+    :param classic_guide_param_fn: predicate on names of parameters in guide which should be optimized classically without Stein
+            (E.g., parameters for large normal networks or other transformation)
     :param static_kwargs: static arguments for the model / guide, i.e. arguments
         that remain constant during fitting.
     """
-    def __init__(self, model, guide, optim, loss, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, scale_factor=1.0, **static_kwargs):
+    def __init__(self, model, guide, optim, loss, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, loss_temperature=1.0, repulsion_temperature=1.0,
+                classic_guide_params_fn=lambda name: False, **static_kwargs):
         assert isinstance(guide, AutoDelta) # Only AutoDelta guide supported for now
         self.model = model
         self.guide = guide
@@ -53,40 +56,42 @@ class SVGD(object):
         self.static_kwargs = static_kwargs
         self.num_stein_particles = num_stein_particles
         self.num_loss_particles = num_loss_particles
-        self.scale_factor = scale_factor
+        self.loss_temperature = loss_temperature
+        self.repulsion_temperature = repulsion_temperature
+        self.classic_guide_params_fn = classic_guide_params_fn
         self.guide_param_names = None
         self.constrain_fn = None
 
     def _svgd_loss_and_grads(self, rng_key, unconstr_params, *args, **kwargs):
         # 0. Separate model and guide parameters, since only guide parameters are updated using Stein
-        model_uparams = {p: v for p, v in unconstr_params.items() if p not in self.guide_param_names}
-        guide_uparams = {p: v for p, v in unconstr_params.items() if p in self.guide_param_names}
+        classic_uparams = {p: v for p, v in unconstr_params.items() if p not in self.guide_param_names or self.classic_guide_params_fn(p)}
+        stein_uparams = {p: v for p, v in unconstr_params.items() if p not in classic_uparams}
         # 1. Collect each guide parameter into monolithic particles that capture correlations between parameter values across each individual particle
-        guide_particles, unravel_pytree, unravel_pytree_batched = ravel_pytree(guide_uparams, batch_dims=1)
+        stein_particles, unravel_pytree, unravel_pytree_batched = ravel_pytree(stein_uparams, batch_dims=1)
 
         # 2. Calculate loss and gradients for each parameter (broadcasting by num_loss_particles for increased variance reduction)
-        def scaled_loss(rng_key, model_params, guide_params):
-            params = {**model_params, **guide_params}
+        def scaled_loss(rng_key, classic_params, stein_params):
+            params = {**classic_params, **stein_params}
             loss_val = self.loss.loss(rng_key, params, self.model, self.guide, *args, **kwargs, **self.static_kwargs)
-            return - self.scale_factor * loss_val
+            return - self.loss_temperature * loss_val
 
         rng_keys = jax.random.split(rng_key, self.num_stein_particles)
         # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
         loss, particle_ljp_grads = jax.vmap(lambda rk, ps: jax.value_and_grad(lambda ps: 
-                                            scaled_loss(rk, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, guide_particles)
-        model_param_grads = jax.vmap(lambda rk, ps: jax.grad(lambda mps: 
-                                            scaled_loss(rk, self.constrain_fn(mps), self.constrain_fn(unravel_pytree(ps))))(model_uparams))(rng_keys, guide_particles)
-        model_param_grads = tree_map(jax.partial(np.mean, axis=0), model_param_grads)
+                                            scaled_loss(rk, self.constrain_fn(classic_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, stein_particles)
+        classic_param_grads = jax.vmap(lambda rk, ps: jax.grad(lambda cps: 
+                                            scaled_loss(rk, self.constrain_fn(cps), self.constrain_fn(unravel_pytree(ps))))(classic_uparams))(rng_keys, stein_particles)
+        classic_param_grads = tree_map(jax.partial(np.mean, axis=0), classic_param_grads)
         # 3. Calculate kernel on monolithic particle
-        log_kernel = self.log_kernel_fn(guide_particles)
+        log_kernel = self.log_kernel_fn(stein_particles)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
-        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: np.exp(log_kernel(x, y)) * x_ljp_grad)(guide_particles, particle_ljp_grads), axis=0) )(guide_particles)
-        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: jax.grad(lambda x: np.exp(log_kernel(x, y)))(x))(guide_particles), axis=0))(guide_particles)
+        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: np.exp(log_kernel(x, y)) * x_ljp_grad)(stein_particles, particle_ljp_grads), axis=0) )(stein_particles)
+        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: self.repulsion_temperature * jax.grad(lambda x: np.exp(log_kernel(x, y)))(x))(stein_particles), axis=0))(stein_particles)
         particle_grads = (attractive_force + repulsive_force) / self.num_stein_particles
         # 5. Decompose the monolithic particle forces back to concrete parameter values
-        guide_param_grads = unravel_pytree_batched(particle_grads)
+        stein_param_grads = unravel_pytree_batched(particle_grads)
         # 6. Return loss and gradients (based on parameter forces)
-        res_grads = tree_map(lambda x: -x, {**model_param_grads, **guide_param_grads})
+        res_grads = tree_map(lambda x: -x, {**classic_param_grads, **stein_param_grads})
         return -np.mean(loss), res_grads
 
     
