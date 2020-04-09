@@ -13,6 +13,17 @@ import jax.random
 import jax.numpy as np
 from jax.tree_util import tree_map
 
+# TODO, next steps.
+# * Allow scaling of log-probability, and non-linearity to repulsive force
+# * Allow some guide parameters to optimized clasically (no Stein), e.g. global transformations/neural networks
+# * Implement multivariate RBF kernel support
+# * Implement IMQ kernel like in Pyro (Measuring Sample Quality)
+# * Implement linear and random kernel
+# * Implement Matrix valued kernels (For second-order stuff)
+# * Implement Stein Point MCMC updates
+# * Integrate projected SVN ideas in matrix valued kernels/inference
+
+
 SVGDState = namedtuple('SVGDState', ['optim_state', 'rng_key'])
 
 # Lots of code based on SVI interface and commonalities should be refactored
