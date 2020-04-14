@@ -7,6 +7,8 @@ from numpyro_stein.stein.autoguides import AutoDelta
 from numpyro_stein.util import ravel_pytree, init_with_noise
 from numpyro_stein.distributions.flat import Flat
 from numpyro_stein.distributions.normal_mixture_distribution import NormalMixture
+from numpyro_stein.stein.kernels import SteinKernel
+from typing import Callable
 
 import jax
 import jax.random
@@ -33,7 +35,7 @@ class SVGD(object):
         (recognition network).
     :param optim: an instance of :class:`~numpyro.optim._NumpyroOptim`.
     :param loss: ELBO loss, i.e. negative Evidence Lower Bound, to minimize.
-    :param log_kernel_fn: Function that produces a logarithm of the statistical kernel to use with Stein inference
+    :param kernel_fn: Function that produces a logarithm of the statistical kernel to use with Stein inference
     :param num_stein_particles: number of particles for Stein inference.
         (More particles capture more of the posterior distribution)
     :param num_loss_particles: number of particles to evaluate the loss.
@@ -45,14 +47,16 @@ class SVGD(object):
     :param static_kwargs: static arguments for the model / guide, i.e. arguments
         that remain constant during fitting.
     """
-    def __init__(self, model, guide, optim, loss, log_kernel_fn, num_stein_particles=10, num_loss_particles=2, loss_temperature=1.0, repulsion_temperature=1.0,
-                classic_guide_params_fn=lambda name: False, **static_kwargs):
+    def __init__(self, model, guide, optim, loss, kernel_fn: SteinKernel,
+                 num_stein_particles: int=10, num_loss_particles: int=2,
+                 loss_temperature: float=1.0, repulsion_temperature: float=1.0, 
+                 classic_guide_params_fn: Callable[[str], bool]=lambda name: False, **static_kwargs):
         assert isinstance(guide, AutoDelta) # Only AutoDelta guide supported for now
         self.model = model
         self.guide = guide
         self.optim = optim
         self.loss = loss
-        self.log_kernel_fn = log_kernel_fn
+        self.kernel_fn = kernel_fn
         self.static_kwargs = static_kwargs
         self.num_stein_particles = num_stein_particles
         self.num_loss_particles = num_loss_particles
@@ -61,6 +65,14 @@ class SVGD(object):
         self.classic_guide_params_fn = classic_guide_params_fn
         self.guide_param_names = None
         self.constrain_fn = None
+
+    def _kernel_grad(self, kernel, x, y):
+        if self.kernel_fn.mode() == 'norm':
+            return jax.grad(lambda x: kernel(x, y))(x)
+        elif self.kernel_fn.mode() == 'vector':
+            return jax.vmap(lambda i: jax.grad(lambda xi: kernel(xi, y[i]))(x[i]))(enumerate(x.shape))
+        else:
+            assert False, 'Non-supported kernel model'
 
     def _svgd_loss_and_grads(self, rng_key, unconstr_params, *args, **kwargs):
         # 0. Separate model and guide parameters, since only guide parameters are updated using Stein
@@ -83,10 +95,10 @@ class SVGD(object):
                                             scaled_loss(rk, self.constrain_fn(cps), self.constrain_fn(unravel_pytree(ps))))(classic_uparams))(rng_keys, stein_particles)
         classic_param_grads = tree_map(jax.partial(np.mean, axis=0), classic_param_grads)
         # 3. Calculate kernel on monolithic particle
-        log_kernel = self.log_kernel_fn(stein_particles)
+        kernel = self.kernel_fn.compute(stein_particles)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
-        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: np.exp(log_kernel(x, y)) * x_ljp_grad)(stein_particles, particle_ljp_grads), axis=0) )(stein_particles)
-        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: self.repulsion_temperature * jax.grad(lambda x: np.exp(log_kernel(x, y)))(x))(stein_particles), axis=0))(stein_particles)
+        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: kernel(x, y) * x_ljp_grad)(stein_particles, particle_ljp_grads), axis=0))(stein_particles)
+        repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: self.repulsion_temperature * self._kernel_grad(kernel, x, y))(stein_particles), axis=0))(stein_particles)
         particle_grads = (attractive_force + repulsive_force) / self.num_stein_particles
         # 5. Decompose the monolithic particle forces back to concrete parameter values
         stein_param_grads = unravel_pytree_batched(particle_grads)
@@ -182,6 +194,7 @@ if __name__ == "__main__":
     from numpyro.infer import ELBO
     from numpyro.infer.util import init_to_value
     import seaborn as sns
+    import os
     rng_key = jax.random.PRNGKey(1356)
     rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
     num_iterations = 1500
@@ -189,14 +202,17 @@ if __name__ == "__main__":
         numpyro.sample('x', NormalMixture(np.array([1/3, 2/3]), np.array([-2., 2.]), np.array([1., 1.])))
 
     guide = AutoDelta(model, init_strategy=init_with_noise(init_to_value({'x': -10.}), noise_scale=1.0))
-    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), ELBO(), kernels.rbf_kernel, num_stein_particles=100, num_loss_particles=3)
+    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), ELBO(),
+                kernels.RBFKernel(bandwidth_factor=lambda n: 1.), num_stein_particles=100, num_loss_particles=3)
     svgd_state = svgd.init(rng_key)
     sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
-    plt.savefig('initial_svgd.png')
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig('figures/initial_svgd.png')
     for i in range(num_iterations):
         svgd_state, loss = svgd.update(svgd_state)
         if i % 100 == 0:
             print(loss)
+    plt.clf()
     sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
-    plt.savefig('final_svgd.png')
+    plt.savefig('figures/final_svgd.png')
     print(svgd.get_params(svgd_state))
