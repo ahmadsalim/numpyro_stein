@@ -14,13 +14,13 @@ import jax.numpy as np
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Implement multivariate RBF kernel support
+# * Test multivariate RBF kernel support
+# * Optimize running the implementation with compiled loops (look at fori_collect and how it is used in NumPyro)
 # * Implement IMQ kernel like in Pyro (Measuring Sample Quality)
 # * Implement linear and random kernel
 # * Implement Matrix valued kernels (For second-order stuff)
 # * Implement Stein Point MCMC updates
 # * Integrate projected SVN ideas in matrix valued kernels/inference
-# * Optimize running the implementation with compiled loops (look at fori_collect and how it is used in NumPyro)
 
 
 SVGDState = namedtuple('SVGDState', ['optim_state', 'rng_key'])
@@ -83,8 +83,8 @@ class SVGD(object):
         # 2. Calculate loss and gradients for each parameter (broadcasting by num_loss_particles for increased variance reduction)
         def scaled_loss(rng_key, classic_params, stein_params):
             params = {**classic_params, **stein_params}
-            loss_val = self.loss.loss(rng_key, params, self.model, self.guide, *args, **kwargs, **self.static_kwargs)
-            return - self.loss_temperature * loss_val
+            loss_val = self.loss.loss(rng_key, params, handlers.scale(self.model, self.loss_temperature), self.guide, *args, **kwargs, **self.static_kwargs)
+            return - loss_val
 
         rng_keys = jax.random.split(rng_key, self.num_stein_particles)
         # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)

@@ -363,3 +363,4 @@ $RECYCLE.BIN/
 # End of https://www.gitignore.io/api/vim,linux,macos,emacs,python,windows,pycharm+all,jupyternotebooks,visualstudiocode
 .vscode/
 figures/
+examples/data/*
