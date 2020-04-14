@@ -4,10 +4,8 @@ from numpyro.distributions import constraints
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import transform_fn, log_density
 from numpyro_stein.stein.autoguides import AutoDelta
-from numpyro_stein.util import ravel_pytree, init_with_noise
-from numpyro_stein.distributions.flat import Flat
-from numpyro_stein.distributions.normal_mixture_distribution import NormalMixture
 from numpyro_stein.stein.kernels import SteinKernel
+from numpyro_stein.util import ravel_pytree
 from typing import Callable
 
 import jax
@@ -22,6 +20,7 @@ from jax.tree_util import tree_map
 # * Implement Matrix valued kernels (For second-order stuff)
 # * Implement Stein Point MCMC updates
 # * Integrate projected SVN ideas in matrix valued kernels/inference
+# * Optimize running the implementation with compiled loops (look at fori_collect and how it is used in NumPyro)
 
 
 SVGDState = namedtuple('SVGDState', ['optim_state', 'rng_key'])
@@ -185,34 +184,3 @@ class SVGD(object):
         loss_val, _ = self._svgd_loss_and_grads(rng_key_eval, params, 
                                                 *args, **kwargs, **self.static_kwargs)
         return loss_val
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    import numpyro
-    import numpyro.distributions as dist
-    import numpyro_stein.stein.kernels as kernels
-    from numpyro.infer import ELBO
-    from numpyro.infer.util import init_to_value
-    import seaborn as sns
-    import os
-    rng_key = jax.random.PRNGKey(1356)
-    rng_key, data_key1, data_key2, data_key3 = jax.random.split(rng_key, num=4)
-    num_iterations = 1500
-    def model():
-        numpyro.sample('x', NormalMixture(np.array([1/3, 2/3]), np.array([-2., 2.]), np.array([1., 1.])))
-
-    guide = AutoDelta(model, init_strategy=init_with_noise(init_to_value({'x': -10.}), noise_scale=1.0))
-    svgd = SVGD(model, guide, numpyro.optim.Adagrad(step_size=1.0), ELBO(),
-                kernels.RBFKernel(bandwidth_factor=lambda n: 1.), num_stein_particles=100, num_loss_particles=3)
-    svgd_state = svgd.init(rng_key)
-    sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
-    os.makedirs('figures', exist_ok=True)
-    plt.savefig('figures/initial_svgd.png')
-    for i in range(num_iterations):
-        svgd_state, loss = svgd.update(svgd_state)
-        if i % 100 == 0:
-            print(loss)
-    plt.clf()
-    sns.kdeplot(svgd.get_params(svgd_state)['auto_x'])
-    plt.savefig('figures/final_svgd.png')
-    print(svgd.get_params(svgd_state))

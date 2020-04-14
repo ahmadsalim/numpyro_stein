@@ -37,13 +37,3 @@ class NormalMixture(Distribution):
             self._validate_sample(value)
         wlog_prob = np.log(self.weights) + mlog_prob
         return scipy.special.logsumexp(wlog_prob, axis=-1)
-
-if __name__ == "__main__":
-    key = random.PRNGKey(rand.randint(0, 10000))
-    ws = np.array([0.5,0.3,0.2])
-    mus = np.array([0.0, 100.0, -100.0])
-    sds = np.array([10.0, 10.0, 10.0])
-    nd = NormalMixture(ws, mus, sds)
-    vs = nd.sample(key, sample_shape=())
-    print(vs)
-    print(nd.log_prob(vs))
