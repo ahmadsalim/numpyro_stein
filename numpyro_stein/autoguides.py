@@ -13,8 +13,6 @@ class PlatedAutoGuide(AutoGuide):
     def __init__(self, model, *, prefix='auto', create_plates=None):
         self.create_plates = create_plates
         self._prototype_frames = {}
-        self._param_map = None
-        self.init_params = None
         super(PlatedAutoGuide, self).__init__(model, prefix=prefix)
 
     def _setup_prototype(self, *args, **kwargs):
@@ -46,8 +44,12 @@ class PlatedAutoGuide(AutoGuide):
 class AutoDelta(PlatedAutoGuide, ReinitGuide):
     def __init__(self, model, *, prefix='auto', init_strategy=init_to_uniform(), create_plates=None):
         self.init_strategy = init_strategy
-        self.params = {}
+        self._param_map = None
+        self._init_params = None
         super(AutoDelta, self).__init__(model, prefix=prefix, create_plates=create_plates)
+
+    def init_params(self):
+        return self._init_params
 
     def __call__(self, *args, **kwargs):
         if self.prototype_trace is None:
@@ -87,7 +89,7 @@ class AutoDelta(PlatedAutoGuide, ReinitGuide):
                 param_val = biject_to(site['fn'].support)(init_params[name])
                 params[name] = (param_name, param_val, site['fn'].support)
         self._param_map = params
-        self.init_params = {param: (val, constr) for param, val, constr in self._param_map.values()}
+        self._init_params = {param: (val, constr) for param, val, constr in self._param_map.values()}
 
     def _setup_prototype(self, *args, **kwargs):
         super(AutoDelta, self)._setup_prototype(*args, **kwargs)

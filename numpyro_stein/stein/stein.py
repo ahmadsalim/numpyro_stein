@@ -124,6 +124,7 @@ class SVGD(object):
         rng_key, particle_seed = jax.random.split(rng_key)
         particle_seeds = jax.random.split(particle_seed, num=self.num_stein_particles)
         self.guide.find_params(particle_seeds, *args, **kwargs, **self.static_kwargs) # Get parameter values for each particle
+        guide_init_params = self.guide.init_params()
         params = {}
         inv_transforms = {}
         guide_param_names = set()
@@ -133,8 +134,8 @@ class SVGD(object):
                 constraint = site['kwargs'].pop('constraint', constraints.real)
                 transform = biject_to(constraint)
                 inv_transforms[site['name']] = transform
-                if site['name'] in self.guide.init_params:
-                    pval, _ = self.guide.init_params[site['name']]
+                if site['name'] in guide_init_params:
+                    pval, _ = guide_init_params[site['name']]
                 else:
                     pval =  site['value']
                 params[site['name']] = transform.inv(pval)
