@@ -4,7 +4,7 @@ from numpyro.distributions import constraints
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import transform_fn, log_density
 from numpyro.util import fori_loop
-from numpyro_stein.stein.autoguides import AutoDelta
+from numpyro_stein.guides import ReinitGuide
 from numpyro_stein.stein.kernels import SteinKernel
 from numpyro_stein.util import ravel_pytree
 from typing import Callable
@@ -51,7 +51,7 @@ class SVGD(object):
                  num_stein_particles: int=10, num_loss_particles: int=2,
                  loss_temperature: float=1.0, repulsion_temperature: float=1.0, 
                  classic_guide_params_fn: Callable[[str], bool]=lambda name: False, **static_kwargs):
-        assert isinstance(guide, AutoDelta) # Only AutoDelta guide supported for now
+        assert isinstance(guide, ReinitGuide) # Only AutoDelta guide supported for now
         self.model = model
         self.guide = guide
         self.optim = optim

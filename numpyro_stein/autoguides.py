@@ -7,6 +7,7 @@ from numpyro.distributions.transforms import biject_to
 from numpyro.infer import SVI, ELBO
 from numpyro.infer.util import find_valid_initial_params, init_to_uniform
 from numpyro.contrib.autoguide import AutoGuide
+from numpyro_stein.guides import ReinitGuide
 
 class PlatedAutoGuide(AutoGuide):
     def __init__(self, model, *, prefix='auto', create_plates=None):
@@ -42,7 +43,7 @@ class PlatedAutoGuide(AutoGuide):
                     self.plates[name] = numpyro.plate(name, frame.size, dim=frame.dim)
         return self.plates
 
-class AutoDelta(PlatedAutoGuide):
+class AutoDelta(PlatedAutoGuide, ReinitGuide):
     def __init__(self, model, *, prefix='auto', init_strategy=init_to_uniform(), create_plates=None):
         self.init_strategy = init_strategy
         self.params = {}

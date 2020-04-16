@@ -6,11 +6,11 @@ import jax.scipy.stats
 class SteinKernel(ABC):
     @abstractmethod
     def mode(self):
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def compute(self, particles):
-        pass
+        raise NotImplementedError
 
 class RBFKernel(SteinKernel):
     """
