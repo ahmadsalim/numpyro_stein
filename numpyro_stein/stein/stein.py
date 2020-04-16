@@ -27,7 +27,7 @@ from jax.tree_util import tree_map
 SVGDState = namedtuple('SVGDState', ['optim_state', 'rng_key'])
 
 # Lots of code based on SVI interface and commonalities should be refactored
-class SVGD(object):
+class SVGD:
     """
     Stein Variational Gradient Descent for Non-parametric Inference.
     :param model: Python callable with Pyro primitives for the model.
