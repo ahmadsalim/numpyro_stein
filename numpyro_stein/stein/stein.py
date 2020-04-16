@@ -14,7 +14,6 @@ import jax.numpy as np
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Test multivariate RBF kernel support
 # * Optimize running the implementation with compiled loops (look at fori_collect and how it is used in NumPyro)
 # * Implement IMQ kernel like in Pyro (Measuring Sample Quality)
 # * Implement linear and random kernel
@@ -69,7 +68,7 @@ class SVGD(object):
         if self.kernel_fn.mode() == 'norm':
             return jax.grad(lambda x: kernel(x, y))(x)
         elif self.kernel_fn.mode() == 'vector':
-            return jax.vmap(lambda i: jax.grad(lambda xi: kernel(xi, y[i]))(x[i]))(enumerate(x.shape))
+            return jax.vmap(lambda i: jax.grad(lambda xi: kernel(xi, y[i])[i])(x[i]))(np.arange(x.shape[0]))
         else:
             assert False, 'Non-supported kernel model'
 
