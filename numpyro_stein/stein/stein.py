@@ -3,18 +3,20 @@ from numpyro import handlers
 from numpyro.distributions import constraints
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import transform_fn, log_density
+from numpyro.util import fori_loop
 from numpyro_stein.stein.autoguides import AutoDelta
 from numpyro_stein.stein.kernels import SteinKernel
 from numpyro_stein.util import ravel_pytree
 from typing import Callable
+import tqdm
 
 import jax
 import jax.random
 import jax.numpy as np
+from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Optimize running the implementation with compiled loops (look at fori_collect and how it is used in NumPyro)
 # * Implement IMQ kernel like in Pyro (Measuring Sample Quality)
 # * Implement linear and random kernel
 # * Implement Matrix valued kernels (For second-order stuff)
@@ -167,6 +169,25 @@ class SVGD(object):
                                                     *args, **kwargs, **self.static_kwargs)
         optim_state = self.optim.update(grads, state.optim_state)
         return SVGDState(optim_state, rng_key), loss_val
+
+    def run(self, rng_key, num_steps, *args, return_last=True, progbar=True, **kwargs):
+        def bodyfn(i, info):
+            svgd_state, losses = info
+            svgd_state, loss = self.update(svgd_state, *args, **kwargs)
+            losses = ops.index_update(losses, i, loss)
+            return svgd_state, losses
+        svgd_state = self.init(rng_key, *args, **kwargs)
+        losses = np.empty((num_steps,))
+        if not progbar:
+            svgd_state, losses = fori_loop(0, num_steps, bodyfn, (svgd_state, losses))
+        else:
+            with tqdm.trange(num_steps) as t:
+                for i in t:
+                    svgd_state, losses = jax.jit(bodyfn)(i, (svgd_state, losses))
+                    t.set_description('SVGD {:.5}'.format(losses[i]), refresh=False)
+                    t.update()
+        loss_res = losses[-1] if return_last else losses
+        return svgd_state, loss_res
 
     def evaluate(self, state, *args, **kwargs):
         """
