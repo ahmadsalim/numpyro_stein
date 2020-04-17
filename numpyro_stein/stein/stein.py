@@ -17,7 +17,6 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Implement IMQ kernel like in Pyro (Measuring Sample Quality)
 # * Implement linear and random kernel
 # * Implement Matrix valued kernels (For second-order stuff)
 # * Implement Stein Point MCMC updates
