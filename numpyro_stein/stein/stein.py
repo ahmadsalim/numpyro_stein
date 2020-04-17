@@ -17,8 +17,8 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Implement linear and random kernel
 # * Implement Matrix valued kernels (For second-order stuff)
+# * Test out all the kernels
 # * Implement Stein Point MCMC updates
 # * Integrate projected SVN ideas in matrix valued kernels/inference
 
