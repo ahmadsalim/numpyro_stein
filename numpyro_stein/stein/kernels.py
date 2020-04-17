@@ -41,10 +41,8 @@ class RBFKernel(SteinKernel):
         if self._mode == 'norm':
             bandwidth = bandwidth[0]
         def kernel(x, y):
-            if self._mode == 'norm':
-                return np.exp (- (np.linalg.norm(x - y, ord=2) ** 2) / bandwidth)
-            else:
-                return np.exp (- (x - y) ** 2 / bandwidth)
+            diff = np.linalg.norm(x - y, ord=2) if self._mode == 'norm' and x.ndim >= 1 else x - y
+            return np.exp (- diff ** 2 / bandwidth)
         return kernel
 
     def mode(self):
