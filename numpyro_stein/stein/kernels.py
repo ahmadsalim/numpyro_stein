@@ -1,9 +1,20 @@
 from abc import ABC, abstractmethod
-from typing import Callable, List
+from typing import Callable, List, Dict, Tuple
 import numpy as onp
 import numpy.random as onpr
 import jax.numpy as np
 import jax.scipy.stats
+import jax.scipy.linalg
+
+class PrecondMatrix(ABC):
+    @abstractmethod
+    def compute(self, particles: np.ndarray, loss_fn: Callable[[np.ndarray], float]):
+        """
+        Computes a preconditioning matrix for a given set of particles and a loss function
+        :param particles: The Stein particles to compute the preconditioning matrix from
+        :param loss_fn: Loss function given particles
+        """
+        raise NotImplementedError
 
 class SteinKernel(ABC):
     @property
@@ -15,50 +26,54 @@ class SteinKernel(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def compute(self, particles):
+    def compute(self, particles: np.ndarray, particle_info: Dict[str, Tuple[int, int]], loss_fn: Callable[[np.ndarray], float]):
         """
         Computes the kernel function given the input Stein particles
         :param particles: The Stein particles to compute the kernel from
+        :param particle_info: A mapping from parameter names to the position in the particle matrix
+        :param loss_fn: Loss function given particles
         """
         raise NotImplementedError
-
-class LossDependentSteinKernel(SteinKernel):
-    def __init__(self):
-        self._loss_fn = None
-
-    @property
-    def loss_fn(self):
-        return self._loss_fn
-
-    @loss_fn.setter
-    def loss_fn(self, loss_fn):
-        self._loss_fn = loss_fn
 
 class RBFKernel(SteinKernel):
     """
     Calculates the Gaussian RBF kernel function with median bandwidth.
     This is the kernel used in the original "Stein Variational Gradient Descent" paper by Liu and Wang
-    :param mode: Either 'norm' (default) specifying to take the norm of each particle or 'vector' to return a component-wise kernel
+    :param mode: Either 'norm' (default) specifying to take the norm of each particle, 'vector' to return a component-wise kernel
+                 or 'matrix' to return a matrix-valued kernel
+    :param matrix_mode: Either 'norm_diag' (default) for diagonal filled with the norm kernel or 'vector_diag' for diagonal of vector-valued kernel
     :param bandwidth_factor: A multiplier to the bandwidth based on data size n (default 1/log(n))
     """
-    def __init__(self, mode='norm', bandwidth_factor: Callable[[float], float]=lambda n: 1 / np.log(n)):
-        assert mode == 'norm' or mode == 'vector'
+    def __init__(self, mode='norm', matrix_mode='norm_diag', bandwidth_factor: Callable[[float], float]=lambda n: 1 / np.log(n)):
+        assert mode == 'norm' or mode == 'vector' or mode == 'matrix'
+        assert matrix_mode == 'norm_diag' or matrix_mode == 'vector_diag'
         self._mode = mode
+        self.matrix_mode = matrix_mode
         self.bandwidth_factor = bandwidth_factor
 
-    def compute(self, particles: np.ndarray):
-        if self._mode == 'norm' and particles.ndim >= 2:
+    def _normed(self):
+        return self._mode == 'norm' or self.matrix_mode == 'norm_diag'
+
+    def compute(self, particles, particle_info, loss_fn):
+        if self._normed() and particles.ndim >= 2:
             particles = np.linalg.norm(particles, ord=2, axis=-1) # N x D -> N
         dists = np.expand_dims(particles, axis=0) - np.expand_dims(particles, axis=1) # N x N (x D)
         dists = np.reshape(dists, (dists.shape[0] * dists.shape[1], -1)) # N * N x D
         factor = self.bandwidth_factor(particles.shape[0])
         median = np.argsort(np.linalg.norm(np.abs(dists), ord=2, axis=-1))[int(dists.shape[0] / 2)]
         bandwidth = np.abs(dists)[median] ** 2 * factor + 1e-5
-        if self._mode == 'norm':
+        if self._normed():
             bandwidth = bandwidth[0]
         def kernel(x, y):
-            diff = np.linalg.norm(x - y, ord=2) if self._mode == 'norm' and x.ndim >= 1 else x - y
-            return np.exp (- diff ** 2 / bandwidth)
+            diff = np.linalg.norm(x - y, ord=2) if self._normed() and x.ndim >= 1 else x - y
+            kernel_res = np.exp (- diff ** 2 / bandwidth)
+            if self._mode == 'matrix':
+                if self.matrix_mode == 'norm_diag':
+                    return kernel_res * np.identity(x.shape[0])
+                else:
+                    return np.diag(kernel_res)
+            else:
+                return kernel_res
         return kernel
 
     @property
@@ -85,7 +100,7 @@ class IMQKernel(SteinKernel):
     def mode(self):
         return self._mode
 
-    def compute(self, particles: np.ndarray):
+    def compute(self, particles, particle_info, loss_fn):
         def kernel(x, y):
             diff = np.linalg.norm(x - y, ord=2) if self._mode == 'norm' else x - y
             return (np.array(self.const) ** 2 + diff ** 2) ** self.expon
@@ -102,7 +117,7 @@ class LinearKernel(SteinKernel):
     def mode(self):
         return self._mode
 
-    def compute(self, particles: np.ndarray):
+    def compute(self, particles: np.ndarray, particle_info, loss_fn):
         def kernel(x, y):
             if x.ndim >= 1:
                 return x @ y + 1
@@ -130,7 +145,7 @@ class RandomFeatureKernel(SteinKernel):
     def mode(self):
         return self._mode
 
-    def compute(self, particles: np.ndarray):
+    def compute(self, particles, particle_info, loss_fn):
         if self._random_weights is None:
             self._random_weights = np.array(onpr.randn(*particles.shape))
             self._random_biases = np.array(onpr.rand(*particles.shape) * 2 * onp.pi)
@@ -153,7 +168,7 @@ class RandomFeatureKernel(SteinKernel):
 
 class MixtureKernel(SteinKernel):
     """
-    Implements a mixture of multiple kernels
+    Implements a mixture of multiple kernels from "Stein Variational Gradient Descent as Moment Matching" by Liu and Wang
     :param ws: Weight of each kernel in the mixture
     :param kernel_fns: Different kernel functions to mix together
     """
@@ -168,11 +183,80 @@ class MixtureKernel(SteinKernel):
     def mode(self):
         return self.kernel_fns[0].mode
 
-    def compute(self, particles: np.ndarray):
-        kernels = [kf.compute(particles) for kf in self.kernel_fns]
+    def compute(self, particles, particle_info, loss_fn):
+        kernels = [kf.compute(particles, particle_info, loss_fn) for kf in self.kernel_fns]
         def kernel(x, y):
             res = self.ws[0] * kernels[0](x, y)
             for w, k in zip(self.ws[1:], kernels[1:]):
                 res = res + w * k(x, y)
             return res
+        return kernel
+
+class HessianPrecondMatrix(PrecondMatrix):
+    """
+    Calculates the constant precondition matrix based on the negative Hessian of the loss 
+    from "Stein Variational Gradient Descent with Matrix-Valued Kernels" by Wang, Tang, Bajaj and Liu
+    """
+    def compute(self, particles, loss_fn):
+        hessian = -np.mean(jax.vmap(jax.hessian(loss_fn))(particles))
+        return hessian
+
+class PrecondMatrixKernel(SteinKernel):
+    """
+    Calculates the preconditioned kernel from "Stein Variational Gradient Descent with Matrix-Valued Kernels" by Wang, Tang, Bajaj and Liu
+    :param precond_matrix_fn: The constant preconditioning matrix
+    :param inner_kernel_fn: The inner kernel function
+    """
+    def __init__(self, precond_matrix_fn: PrecondMatrix, inner_kernel_fn: SteinKernel):
+        assert inner_kernel_fn.mode == 'matrix'
+        self.precond_matrix_fn = precond_matrix_fn
+        self.inner_kernel_fn = inner_kernel_fn
+
+    @property
+    def mode(self):
+        return 'matrix'
+
+    def compute(self, particles, particle_info, loss_fn):
+        Q = self.precond_matrix_fn.compute(particles, loss_fn)
+        Qinv = np.linalg.inv(Q)
+        Ql, Qv = np.linalg.eigh(Q)
+        Qsqrt = Qv @ np.diag(Ql ** 0.5) @ Qv.tranpose()
+        Qinvl, Qinvv = np.linalg.eigh(Qinv)
+        Qinvsqrt = Qinvv @ np.diag(Qinvl ** 0.5) @ Qinvv.transpose()
+        inner_kernel = self.inner_kernel_fn.compute(particles, particle_info, loss_fn)
+        def kernel(x, y):
+            return Qinvsqrt @ inner_kernel(Qsqrt @ x, Qsqrt @ y) @ Qinvsqrt
+        return kernel
+
+class GraphicalKernel(SteinKernel):
+    """
+    Calculates graphical kernel used in "Stein Variational Message Passing for Continuous Graphical Models" by Wang, Zheng and Liu
+    :param local_kernel_fns: A mapping between parameters and a choice of kernel function for that parameter (default to default_kernel_fn for each parameter)
+    :param default_kernel_fn: The default choice of kernel function when none is specified for a particular parameter
+    """
+    def __init__(self, local_kernel_fns: Dict[str, SteinKernel]=None, default_kernel_fn: SteinKernel=RBFKernel()):
+        self.local_kernel_fns = local_kernel_fns if local_kernel_fns is not None else {}
+        self.default_kernel_fn = default_kernel_fn
+
+    @property
+    def mode(self):
+        return 'matrix'
+
+    def compute(self, particles, particle_info, loss_fn):
+        local_kernels = []
+        for pk, (start_idx, end_idx) in particle_info.items():
+            pk_kernel_fn = self.local_kernel_fns.get(pk, self.default_kernel_fn)
+            pk_loss_fn = lambda ps: loss_fn(np.concatenate([particles[:, :start_idx], ps, particles[:, end_idx:]], axis=-1))
+            pk_kernel = pk_kernel_fn.compute(particles[:, start_idx:end_idx], {pk: (0, end_idx - start_idx)}, pk_loss_fn)
+            local_kernels.append((pk_kernel, pk_kernel_fn.mode, start_idx, end_idx))
+        def kernel(x, y):
+            kernel_res = []
+            for kernel, mode, start_idx, end_idx in local_kernels:
+                v = kernel(x[start_idx:end_idx], y[start_idx:end_idx])
+                if mode == 'norm':
+                    v = v * np.identity(end_idx - start_idx)
+                elif mode == 'vector':
+                    v = np.diag(v)
+                kernel_res.append(v)
+            return jax.scipy.linalg.block_diag(*kernel_res)
         return kernel

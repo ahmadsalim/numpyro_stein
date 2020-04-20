@@ -17,6 +17,7 @@ setuptools.setup(
         "License :: OSI Approved :: Apache License 2.0",
         "Operating System :: OS Independent",
     ],
-    install_requires=["numpyro", "matplotlib", "seaborn"],
+    install_requires=["numpyro", "matplotlib", "seaborn",
+                      "jax>=0.1.63", "jaxlib>=0.1.43"],
     python_requires='>=3.6',
 )

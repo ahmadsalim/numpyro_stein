@@ -17,8 +17,9 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Implement Matrix valued kernels (For second-order stuff)
-# * Test out all the kernels
+# * Implement mixture precond in existing kernels
+# * Fix SVGD interface for matrix kernels
+# * Test out all the matrix kernels
 # * Implement Stein Point MCMC updates
 # * Integrate projected SVN ideas in matrix valued kernels/inference
 
@@ -73,12 +74,24 @@ class SVGD:
         else:
             assert False, 'Non-supported kernel model'
 
+    def _calc_particle_info(self, uparams, num_particles):
+        uparam_keys = list(uparams.keys())
+        uparam_keys.sort()
+        start_index = 0
+        res = {}
+        for k in uparam_keys:
+            end_index = start_index + uparams[k].size // num_particles
+            res[k] = (start_index, end_index)
+            start_index = end_index
+        return res
+
     def _svgd_loss_and_grads(self, rng_key, unconstr_params, *args, **kwargs):
         # 0. Separate model and guide parameters, since only guide parameters are updated using Stein
         classic_uparams = {p: v for p, v in unconstr_params.items() if p not in self.guide_param_names or self.classic_guide_params_fn(p)}
         stein_uparams = {p: v for p, v in unconstr_params.items() if p not in classic_uparams}
         # 1. Collect each guide parameter into monolithic particles that capture correlations between parameter values across each individual particle
         stein_particles, unravel_pytree, unravel_pytree_batched = ravel_pytree(stein_uparams, batch_dims=1)
+        particle_info = self._calc_particle_info(stein_uparams, stein_particles.shape[0])
 
         # 2. Calculate loss and gradients for each parameter (broadcasting by num_loss_particles for increased variance reduction)
         def scaled_loss(rng_key, classic_params, stein_params):
@@ -86,15 +99,14 @@ class SVGD:
             loss_val = self.loss.loss(rng_key, params, handlers.scale(self.model, self.loss_temperature), self.guide, *args, **kwargs, **self.static_kwargs)
             return - loss_val
 
-        rng_keys = jax.random.split(rng_key, self.num_stein_particles)
         # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
-        loss, particle_ljp_grads = jax.vmap(lambda rk, ps: jax.value_and_grad(lambda ps: 
-                                            scaled_loss(rk, self.constrain_fn(classic_uparams), self.constrain_fn(unravel_pytree(ps))))(ps))(rng_keys, stein_particles)
-        classic_param_grads = jax.vmap(lambda rk, ps: jax.grad(lambda cps: 
-                                            scaled_loss(rk, self.constrain_fn(cps), self.constrain_fn(unravel_pytree(ps))))(classic_uparams))(rng_keys, stein_particles)
+        kernel_particle_loss_fn = lambda ps: scaled_loss(rng_key, self.constrain_fn(classic_uparams), self.constrain_fn(unravel_pytree(ps)))
+        loss, particle_ljp_grads = jax.vmap(jax.value_and_grad(kernel_particle_loss_fn))(stein_particles)
+        classic_param_grads = jax.vmap(lambda ps: jax.grad(lambda cps: 
+                                            scaled_loss(rng_key, self.constrain_fn(cps), self.constrain_fn(unravel_pytree(ps))))(classic_uparams))(stein_particles)
         classic_param_grads = tree_map(jax.partial(np.mean, axis=0), classic_param_grads)
         # 3. Calculate kernel on monolithic particle
-        kernel = self.kernel_fn.compute(stein_particles)
+        kernel = self.kernel_fn.compute(stein_particles, particle_info, kernel_particle_loss_fn)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
         attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: kernel(x, y) * x_ljp_grad)(stein_particles, particle_ljp_grads), axis=0))(stein_particles)
         repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: self.repulsion_temperature * self._kernel_grad(kernel, x, y))(stein_particles), axis=0))(stein_particles)
