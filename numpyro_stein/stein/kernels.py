@@ -6,6 +6,7 @@ import jax.numpy as np
 import jax.scipy.stats
 
 class SteinKernel(ABC):
+    @property
     @abstractmethod
     def mode(self):
         """
@@ -20,6 +21,18 @@ class SteinKernel(ABC):
         :param particles: The Stein particles to compute the kernel from
         """
         raise NotImplementedError
+
+class LossDependentSteinKernel(SteinKernel):
+    def __init__(self):
+        self._loss_fn = None
+
+    @property
+    def loss_fn(self):
+        return self._loss_fn
+
+    @loss_fn.setter
+    def loss_fn(self, loss_fn):
+        self._loss_fn = loss_fn
 
 class RBFKernel(SteinKernel):
     """
@@ -48,6 +61,7 @@ class RBFKernel(SteinKernel):
             return np.exp (- diff ** 2 / bandwidth)
         return kernel
 
+    @property
     def mode(self):
         return self._mode
 
@@ -68,6 +82,7 @@ class IMQKernel(SteinKernel):
         self.const = const
         self.expon = expon
 
+    @property
     def mode(self):
         return self._mode
 
@@ -85,6 +100,7 @@ class LinearKernel(SteinKernel):
     def __init__(self):
         self._mode = 'norm'
 
+    @property
     def mode(self):
         return self._mode
 
@@ -113,6 +129,7 @@ class RandomFeatureKernel(SteinKernel):
         self._random_weights = None
         self._random_biases = None
 
+    @property
     def mode(self):
         return self._mode
 
@@ -146,12 +163,13 @@ class MixtureKernel(SteinKernel):
     def __init__(self, ws: List[float], kernel_fns: List[SteinKernel]):
         assert len(ws) == len(kernel_fns)
         assert len(kernel_fns) > 1
-        assert all(kf.mode() == kernel_fns[0].mode() for kf in kernel_fns)
+        assert all(kf.mode == kernel_fns[0].mode for kf in kernel_fns)
         self.ws = ws
         self.kernel_fns = kernel_fns
     
+    @property
     def mode(self):
-        return self.kernel_fns[0].mode()
+        return self.kernel_fns[0].mode
 
     def compute(self, particles: np.ndarray):
         kernels = [kf.compute(particles) for kf in self.kernel_fns]

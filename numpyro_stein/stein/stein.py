@@ -66,9 +66,9 @@ class SVGD:
         self.constrain_fn = None
 
     def _kernel_grad(self, kernel, x, y):
-        if self.kernel_fn.mode() == 'norm':
+        if self.kernel_fn.mode == 'norm':
             return jax.grad(lambda x: kernel(x, y))(x)
-        elif self.kernel_fn.mode() == 'vector':
+        elif self.kernel_fn.mode == 'vector':
             return jax.vmap(lambda i: jax.grad(lambda xi: kernel(xi, y[i])[i])(x[i]))(np.arange(x.shape[0]))
         else:
             assert False, 'Non-supported kernel model'
