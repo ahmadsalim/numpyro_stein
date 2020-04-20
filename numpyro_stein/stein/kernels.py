@@ -65,7 +65,6 @@ class RBFKernel(SteinKernel):
     def mode(self):
         return self._mode
 
-# TODO Test kernel
 class IMQKernel(SteinKernel):
     """
     Calculates the IMQ kernel, from "Measuring Sample Quality with Kernels" by Gorham and Mackey
@@ -92,7 +91,6 @@ class IMQKernel(SteinKernel):
             return (np.array(self.const) ** 2 + diff ** 2) ** self.expon
         return kernel
 
-# TODO Test kernel
 class LinearKernel(SteinKernel):
     """
     Calculates the linear kernel, from "Stein Variational Gradient Descent as Moment Matching" by Liu and Wang
@@ -112,7 +110,6 @@ class LinearKernel(SteinKernel):
                 return x * y + 1
         return kernel
 
-# TODO Test kernel
 class RandomFeatureKernel(SteinKernel):
     """
     Calculates the random kernel, from "Stein Variational Gradient Descent as Moment Matching" by Liu and Wang
