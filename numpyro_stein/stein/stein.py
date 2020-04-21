@@ -17,8 +17,7 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Fix SVGD interface for matrix kernels
-# * Test out all the matrix kernels
+# * Test out matrix SVGD and all kernels
 # * Implement Stein Point MCMC updates
 # * Integrate projected SVN ideas in matrix valued kernels/inference
 
@@ -65,13 +64,20 @@ class SVGD:
         self.guide_param_names = None
         self.constrain_fn = None
 
+    def _apply_kernel(self, kernel, x, y, v):
+        if self.kernel_fn.mode == 'norm' or self.kernel_fn.mode == 'vector':
+            return kernel(x, y) * v
+        else:
+            return kernel(x, y) @ v
+
     def _kernel_grad(self, kernel, x, y):
         if self.kernel_fn.mode == 'norm':
             return jax.grad(lambda x: kernel(x, y))(x)
         elif self.kernel_fn.mode == 'vector':
             return jax.vmap(lambda i: jax.grad(lambda xi: kernel(xi, y[i])[i])(x[i]))(np.arange(x.shape[0]))
         else:
-            assert False, 'Non-supported kernel model'
+            return jax.vmap(lambda l: np.sum(jax.vmap(lambda m: jax.grad(lambda x: kernel(x[m], y[m])[l, m])(x)[m])
+                                            (np.arange(x.shape[0]))))(np.arange(x.shape[0]))
 
     def _calc_particle_info(self, uparams, num_particles):
         uparam_keys = list(uparams.keys())
@@ -107,7 +113,7 @@ class SVGD:
         # 3. Calculate kernel on monolithic particle
         kernel = self.kernel_fn.compute(stein_particles, particle_info, kernel_particle_loss_fn)
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
-        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: kernel(x, y) * x_ljp_grad)(stein_particles, particle_ljp_grads), axis=0))(stein_particles)
+        attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: self._apply_kernel(kernel, x, y, x_ljp_grad))(stein_particles, particle_ljp_grads), axis=0))(stein_particles)
         repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: self.repulsion_temperature * self._kernel_grad(kernel, x, y))(stein_particles), axis=0))(stein_particles)
         particle_grads = (attractive_force + repulsive_force) / self.num_stein_particles
         # 5. Decompose the monolithic particle forces back to concrete parameter values
