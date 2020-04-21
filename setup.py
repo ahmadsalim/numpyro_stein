@@ -18,6 +18,6 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     install_requires=["numpyro", "matplotlib", "seaborn",
-                      "jax>=0.1.63", "jaxlib>=0.1.43"],
+                      "jax==0.1.59", "jaxlib==0.1.38"],
     python_requires='>=3.6',
 )
