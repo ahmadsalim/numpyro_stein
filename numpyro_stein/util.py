@@ -56,3 +56,8 @@ def init_with_noise(init_strategy, noise_scale=1.0):
             unconstrained_init = numpyro.sample('_noisy_init', dist.Normal(loc=base_transform.inv(vals), scale=noise_scale))
             return base_transform(unconstrained_init)
     return init
+
+def sqrth(m):
+    mlambda, mvec = np.linalg.eigh(m)
+    msqrt = mvec @ np.diag(mlambda ** 0.5) @ mvec.tranpose()
+    return msqrt

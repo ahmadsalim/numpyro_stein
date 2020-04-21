@@ -5,6 +5,8 @@ import numpy.random as onpr
 import jax.numpy as np
 import jax.scipy.stats
 import jax.scipy.linalg
+import numpyro.distributions as dist
+from numpyro_stein.util import sqrth
 
 class PrecondMatrix(ABC):
     @abstractmethod
@@ -198,7 +200,7 @@ class HessianPrecondMatrix(PrecondMatrix):
     from "Stein Variational Gradient Descent with Matrix-Valued Kernels" by Wang, Tang, Bajaj and Liu
     """
     def compute(self, particles, loss_fn):
-        hessian = -np.mean(jax.vmap(jax.hessian(loss_fn))(particles))
+        hessian = -jax.vmap(jax.hessian(loss_fn))(particles)
         return hessian
 
 class PrecondMatrixKernel(SteinKernel):
@@ -206,26 +208,37 @@ class PrecondMatrixKernel(SteinKernel):
     Calculates the preconditioned kernel from "Stein Variational Gradient Descent with Matrix-Valued Kernels" by Wang, Tang, Bajaj and Liu
     :param precond_matrix_fn: The constant preconditioning matrix
     :param inner_kernel_fn: The inner kernel function
+    :param precond_mode: How to use the precondition matrix, either constant ('const') 
+                         or as mixture with anchor points ('anchor_points')
     """
-    def __init__(self, precond_matrix_fn: PrecondMatrix, inner_kernel_fn: SteinKernel):
+    def __init__(self, precond_matrix_fn: PrecondMatrix, inner_kernel_fn: SteinKernel,
+                 precond_mode='anchor_points'):
         assert inner_kernel_fn.mode == 'matrix'
+        assert precond_mode == 'const' or precond_mode == 'anchor_points'
         self.precond_matrix_fn = precond_matrix_fn
         self.inner_kernel_fn = inner_kernel_fn
+        self.precond_mode = precond_mode
 
     @property
     def mode(self):
         return 'matrix'
 
     def compute(self, particles, particle_info, loss_fn):
-        Q = self.precond_matrix_fn.compute(particles, loss_fn)
-        Qinv = np.linalg.inv(Q)
-        Ql, Qv = np.linalg.eigh(Q)
-        Qsqrt = Qv @ np.diag(Ql ** 0.5) @ Qv.tranpose()
-        Qinvl, Qinvv = np.linalg.eigh(Qinv)
-        Qinvsqrt = Qinvv @ np.diag(Qinvl ** 0.5) @ Qinvv.transpose()
+        qs = self.precond_matrix_fn.compute(particles, loss_fn)
+        if self.precond_mode == 'const':
+            qs = np.expand_dims(np.mean(qs, axis=0), axis=0)
+        qs_inv = np.linalg.inv(qs)
+        qs_sqrt = sqrth(qs)
+        qs_inv_sqrt = sqrth(qs_inv)
         inner_kernel = self.inner_kernel_fn.compute(particles, particle_info, loss_fn)
         def kernel(x, y):
-            return Qinvsqrt @ inner_kernel(Qsqrt @ x, Qsqrt @ y) @ Qinvsqrt
+            if self.precond_mode == 'const':
+                wxs = np.array([1.])
+                wys = np.array([1.])
+            else:
+                wxs = jax.nn.softmax(jax.vmap(lambda z, q_inv: dist.MultivariateNormal(z, q_inv).log_prob(x))(particles, qs_inv))
+                wys = jax.nn.softmax(jax.vmap(lambda z, q_inv: dist.MultivariateNormal(z, q_inv).log_prob(y))(particles, qs_inv))
+            return np.sum(jax.vmap(lambda qs, qis, wx, wy: qis @ inner_kernel(qs @ x, qs @ y) @ qis.transpose())(qs_sqrt, qs_inv_sqrt, wxs, wys), axis=0)
         return kernel
 
 class GraphicalKernel(SteinKernel):

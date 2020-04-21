@@ -17,7 +17,6 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Implement mixture precond in existing kernels
 # * Fix SVGD interface for matrix kernels
 # * Test out all the matrix kernels
 # * Implement Stein Point MCMC updates
