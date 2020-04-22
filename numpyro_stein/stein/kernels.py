@@ -54,7 +54,7 @@ class RBFKernel(SteinKernel):
         self.bandwidth_factor = bandwidth_factor
 
     def _normed(self):
-        return self._mode == 'norm' or self.matrix_mode == 'norm_diag'
+        return self._mode == 'norm' or (self.mode == 'matrix' and self.matrix_mode == 'norm_diag')
 
     def compute(self, particles, particle_info, loss_fn):
         if self._normed() and particles.ndim >= 2:

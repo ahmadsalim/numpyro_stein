@@ -17,7 +17,6 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Test out matrix SVGD and all kernels
 # * Implement Stein Point MCMC updates
 # * Integrate projected SVN ideas in matrix valued kernels/inference
 
