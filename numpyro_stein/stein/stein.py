@@ -18,8 +18,6 @@ from jax.tree_util import tree_map
 
 # TODO, next steps.
 # * Implement Stein Point MCMC updates
-# * Integrate projected SVN ideas in matrix valued kernels/inference
-
 
 SVGDState = namedtuple('SVGDState', ['optim_state', 'rng_key'])
 
