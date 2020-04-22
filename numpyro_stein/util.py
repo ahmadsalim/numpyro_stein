@@ -59,5 +59,9 @@ def init_with_noise(init_strategy, noise_scale=1.0):
 
 def sqrth(m):
     mlambda, mvec = np.linalg.eigh(m)
-    msqrt = mvec @ np.diag(mlambda ** 0.5) @ mvec.tranpose()
+    if np.ndim(mlambda) >= 2:
+        mlambdasqrt = jax.vmap(lambda ml: np.diag(np.maximum(ml, 1e-5) ** 0.5), in_axes=tuple(range(np.ndim(mlambda) - 1)))(mlambda)
+    else:
+        mlambdasqrt = np.diag(np.maximum(mlambda, 1e-5) ** 0.5)
+    msqrt = mvec @ mlambdasqrt @ np.swapaxes(mvec, -2, -1)
     return msqrt

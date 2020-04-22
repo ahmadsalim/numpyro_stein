@@ -76,7 +76,7 @@ class SVGD:
         elif self.kernel_fn.mode == 'vector':
             return jax.vmap(lambda i: jax.grad(lambda xi: kernel(xi, y[i])[i])(x[i]))(np.arange(x.shape[0]))
         else:
-            return jax.vmap(lambda l: np.sum(jax.vmap(lambda m: jax.grad(lambda x: kernel(x[m], y[m])[l, m])(x)[m])
+            return jax.vmap(lambda l: np.sum(jax.vmap(lambda m: jax.grad(lambda x: kernel(x, y)[l, m])(x)[m])
                                             (np.arange(x.shape[0]))))(np.arange(x.shape[0]))
 
     def _calc_particle_info(self, uparams, num_particles):
