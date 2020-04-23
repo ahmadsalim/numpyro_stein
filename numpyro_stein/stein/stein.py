@@ -17,7 +17,17 @@ from jax import ops
 from jax.tree_util import tree_map
 
 # TODO, next steps.
-# * Implement Stein Point MCMC updates
+# * Implement Stein Point MCMC updates:
+# * * Initialize MCMC sampler on a random subset of points to fix the parameters of e.g., NUTS for a number of warm-up steps
+# * * Calculate KSD values for each particle
+# * * Choose subset to do MCMC updates on based on their existing discrepancy 
+#     (finding those with smallest discrepancy to other points, thus maximizing the collective discrepancy for other points)
+# * * Do MCMC updates for the selected points
+# * * Do global stein updates
+# * Examples:
+# * * Implement Deep Markov Model with Stein updates
+# * * Implement NeuTra-based Sparse Bayesian Logistic Regression
+# * * Implement dynamical process - e.g. economics or biology
 
 SVGDState = namedtuple('SVGDState', ['optim_state', 'rng_key'])
 
