@@ -2,6 +2,7 @@ from functools import namedtuple
 from numpyro import handlers
 from numpyro.distributions import constraints
 from numpyro.distributions.transforms import biject_to
+from numpyro.infer import NUTS, MCMC
 from numpyro.infer.util import transform_fn, log_density
 from numpyro.util import fori_loop
 from numpyro_stein.guides import ReinitGuide
@@ -52,11 +53,14 @@ class SVGD:
     :param static_kwargs: static arguments for the model / guide, i.e. arguments
         that remain constant during fitting.
     """
-    def __init__(self, model, guide, optim, loss, kernel_fn: SteinKernel,
+    def __init__(self, model, guide: ReinitGuide, optim, loss, kernel_fn: SteinKernel,
                  num_stein_particles: int=10, num_loss_particles: int=2,
                  loss_temperature: float=1.0, repulsion_temperature: float=1.0, 
-                 classic_guide_params_fn: Callable[[str], bool]=lambda name: False, **static_kwargs):
-        assert isinstance(guide, ReinitGuide) # Only AutoDelta guide supported for now
+                 classic_guide_params_fn: Callable[[str], bool]=lambda name: False,
+                 sp_mcmc_crit='infl', num_mcmc_particles: int=0, num_mcmc_warmup:int=100, num_mcmc_updates:int=10,
+                 sampler_fn=NUTS, sampler_kwargs=None, mcmc_kwargs=None, **static_kwargs):
+        assert sp_mcmc_crit == 'infl' or sp_mcmc_crit == 'rand'
+        assert 0 <= num_mcmc_particles <= num_stein_particles
         self.model = model
         self.guide = guide
         self.optim = optim
@@ -68,8 +72,17 @@ class SVGD:
         self.loss_temperature = loss_temperature
         self.repulsion_temperature = repulsion_temperature
         self.classic_guide_params_fn = classic_guide_params_fn
+        self.sp_mcmc_crit = sp_mcmc_crit
+        self.num_mcmc_particles = num_mcmc_particles
+        self.num_mcmc_warmup = num_mcmc_warmup
+        self.num_mcmc_updates = num_mcmc_updates
+        self.sampler_fn = sampler_fn
+        self.sampler_kwargs = sampler_kwargs or dict()
+        self.mcmc_kwargs = mcmc_kwargs or dict()
+        self.mcmc: MCMC = None
         self.guide_param_names = None
         self.constrain_fn = None
+        self.uconstrain_fn = None
 
     def _apply_kernel(self, kernel, x, y, v):
         if self.kernel_fn.mode == 'norm' or self.kernel_fn.mode == 'vector':
@@ -111,24 +124,64 @@ class SVGD:
             loss_val = self.loss.loss(rng_key, params, handlers.scale(self.model, self.loss_temperature), self.guide, *args, **kwargs, **self.static_kwargs)
             return - loss_val
 
-        # loss, particle_ljp_grads = jax.value_and_grad(lambda ps: jfp_fn(rng_keys, self.constrain_fn(model_uparams), self.constrain_fn(unravel_pytree(ps))))(guide_particles)
         kernel_particle_loss_fn = lambda ps: scaled_loss(rng_key, self.constrain_fn(classic_uparams), self.constrain_fn(unravel_pytree(ps)))
         loss, particle_ljp_grads = jax.vmap(jax.value_and_grad(kernel_particle_loss_fn))(stein_particles)
         classic_param_grads = jax.vmap(lambda ps: jax.grad(lambda cps: 
                                             scaled_loss(rng_key, self.constrain_fn(cps), self.constrain_fn(unravel_pytree(ps))))(classic_uparams))(stein_particles)
         classic_param_grads = tree_map(jax.partial(np.mean, axis=0), classic_param_grads)
+
         # 3. Calculate kernel on monolithic particle
         kernel = self.kernel_fn.compute(stein_particles, particle_info, kernel_particle_loss_fn)
+
         # 4. Calculate the attractive force and repulsive force on the monolithic particles
         attractive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x, x_ljp_grad: self._apply_kernel(kernel, x, y, x_ljp_grad))(stein_particles, particle_ljp_grads), axis=0))(stein_particles)
         repulsive_force = jax.vmap(lambda y: np.sum(jax.vmap(lambda x: self.repulsion_temperature * self._kernel_grad(kernel, x, y))(stein_particles), axis=0))(stein_particles)
         particle_grads = (attractive_force + repulsive_force) / self.num_stein_particles
+
         # 5. Decompose the monolithic particle forces back to concrete parameter values
         stein_param_grads = unravel_pytree_batched(particle_grads)
+
         # 6. Return loss and gradients (based on parameter forces)
         res_grads = tree_map(lambda x: -x, {**classic_param_grads, **stein_param_grads})
         return -np.mean(loss), res_grads
 
+
+    def _sp_mcmc(self, rng_key, unconstr_params, *args, **kwargs):
+        # 0. Separate classical and stein parameters
+        classic_uparams = {p: v for p, v in unconstr_params.items() if p not in self.guide_param_names or self.classic_guide_params_fn(p)}
+        stein_uparams = {p: v for p, v in unconstr_params.items() if p not in classic_uparams}
+
+        # Fix classical parameters for MCMC run
+        self.mcmc.sampler._model = handlers.substitute(self.mcmc.sampler._model, self.constrain_fn(classic_uparams))
+
+        # 1. Run warmup on a subset of particles to tune the MCMC state
+        warmup_key, mcmc_key = jax.random.split(rng_key)
+        if self.mcmc._warmup_state is None:
+            stein_subset_uparams = {p: v[0:self.num_mcmc_particles] for p, v in stein_uparams.items()}
+            self.mcmc.warmup(warmup_key, *args, init_params=self.constrain_fn(stein_subset_uparams), **kwargs)
+
+        # 2. Choose MCMC particles
+        mcmc_key, choice_key = jax.random.split(mcmc_key)
+        if self.num_stein_particles == self.num_stein_particles:
+            idxs = np.arange(self.num_stein_particles)
+        else:
+            if self.sp_mcmc_crit == 'rand':
+                idxs = jax.random.shuffle(choice_key, np.arange(self.num_stein_particles))[:self.num_mcmc_particles]
+            elif self.sp_mcmc_crit == 'infl':
+                _, grads = self._svgd_loss_and_grads(choice_key, unconstr_params, *args, **kwargs)
+                ksd = np.linalg.norm(np.concatenate([np.reshape(grads[p], (self.num_stein_particles, -1)) for p in stein_uparams.keys()], axis=-1),
+                                    ord=2, axis=-1)
+                idxs = np.argsort(ksd)[:self.num_mcmc_particles]
+            else:
+                assert False, "Unsupported SP MCMC criterion: {}".format(self.sp_mcmc_crit)
+        
+        # 3. Run MCMC on chosen particles
+        stein_subset_uparams = {p: v[idxs] for p, v in stein_uparams.items()}
+        self.mcmc.run(mcmc_key, *args, init_params=self.constrain_fn(stein_subset_uparams), **kwargs)
+        samples_subset_stein_params = self.mcmc.get_samples(group_by_chain=True)
+        sss_uparams = self.uconstrain_fn(samples_subset_stein_params)
+
+        # TODO: Pick the ones with best KSD (should it be global or local?)
     
     def init(self, rng_key, *args, **kwargs):
         """
@@ -149,6 +202,7 @@ class SVGD:
         self.guide.find_params(particle_seeds, *args, **kwargs, **self.static_kwargs) # Get parameter values for each particle
         guide_init_params = self.guide.init_params()
         params = {}
+        transforms = {}
         inv_transforms = {}
         guide_param_names = set()
         # NB: params in model_trace will be overwritten by params in guide_trace
@@ -157,6 +211,7 @@ class SVGD:
                 constraint = site['kwargs'].pop('constraint', constraints.real)
                 transform = biject_to(constraint)
                 inv_transforms[site['name']] = transform
+                transforms[site['name']] = trnasform.inv
                 if site['name'] in guide_init_params:
                     pval, _ = guide_init_params[site['name']]
                 else:
@@ -166,6 +221,12 @@ class SVGD:
                     guide_param_names.add(site['name'])
         self.guide_param_names = guide_param_names
         self.constrain_fn = jax.partial(transform_fn, inv_transforms)
+        self.uconstrain_fn = jax.partial(transform_fn, transforms)
+        classic_uparam_names = {p for p in params.keys() if p not in self.guide_param_names or self.classic_guide_params_fn(p)}
+        # Ensure not to sample parameters that should be classically updated
+        sampler = self.sampler_fn(handlers.block(self.model, lambda site: site['name'] in classic_uparam_names), **self.sampler_kwargs)
+        self.mcmc = MCMC(sampler, self.num_mcmc_warmup, self.num_mcmc_updates, num_chains=self.num_mcmc_particles, progress_bar=False, 
+                         **self.mcmc_kwargs)
         return SVGDState(self.optim.init(params), rng_key)
 
     def get_params(self, state):
@@ -187,8 +248,11 @@ class SVGD:
             during the course of fitting).
         :return: tuple of `(state, loss)`.
         """
-        rng_key, rng_key_step = jax.random.split(state.rng_key)
+        rng_key, rng_key_mcmc, rng_key_step = jax.random.split(state.rng_key, num=4)
         params = self.optim.get_params(state.optim_state)
+        # Run Stein Point MCMC
+        if self.num_mcmc_particles > 0:
+            params = self._sp_mcmc(rng_key_mcmc, params, *args, **kwargs, **self.static_kwargs)
         loss_val, grads = self._svgd_loss_and_grads(rng_key_step, params, 
                                                     *args, **kwargs, **self.static_kwargs)
         optim_state = self.optim.update(grads, state.optim_state)
