@@ -236,7 +236,7 @@ class SVGD:
                 constraint = site['kwargs'].pop('constraint', constraints.real)
                 transform = biject_to(constraint)
                 inv_transforms[site['name']] = transform
-                transforms[site['name']] = trnasform.inv
+                transforms[site['name']] = transform.inv
                 if site['name'] in guide_init_params:
                     pval, _ = guide_init_params[site['name']]
                 else:
@@ -273,7 +273,7 @@ class SVGD:
             during the course of fitting).
         :return: tuple of `(state, loss)`.
         """
-        rng_key, rng_key_mcmc, rng_key_step = jax.random.split(state.rng_key, num=4)
+        rng_key, rng_key_mcmc, rng_key_step = jax.random.split(state.rng_key, num=3)
         params = self.optim.get_params(state.optim_state)
         # Run Stein Point MCMC
         if self.num_mcmc_particles > 0:
