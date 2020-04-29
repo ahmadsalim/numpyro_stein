@@ -50,16 +50,26 @@ class SVGD:
     :param repulsion_temperature: scaling of repulsive forces (Non-linear SVGD)
     :param classic_guide_param_fn: predicate on names of parameters in guide which should be optimized classically without Stein
             (E.g., parameters for large normal networks or other transformation)
-    :param static_kwargs: static arguments for the model / guide, i.e. arguments
+    :param sp_mcmc_crit: Stein Point MCMC update selection criterion, either 'infl' for most influential or 'rand' for random
+    :param sp_mode: Stein Point MCMC mode for calculating Kernelized Stein Discrepancy. Either 'local' for only the updated MCMC particles or 'global' for all particles.
+    :param num_mcmc_particles: Number of particles that should be updated with Stein Point MCMC (should be a subset of number of Stein particles)
+    :param num_mcmc_warmup: Number of warmup steps for the MCMC sampler
+    :param num_mcmc_updates: Number of MCMC update steps at each iteration
+    :param sampler_fn: The MCMC sampling kernel used for the Stein Point MCMC updates
+    :param sampler_kwargs: Keyword arguments provided to the MCMC sampling kernel
+    :param mcmc_kwargs: Keyword arguments provided to the MCMC interface
+    :param static_kwargs: Static keyword arguments for the model / guide, i.e. arguments
         that remain constant during fitting.
     """
     def __init__(self, model, guide: ReinitGuide, optim, loss, kernel_fn: SteinKernel,
                  num_stein_particles: int=10, num_loss_particles: int=2,
                  loss_temperature: float=1.0, repulsion_temperature: float=1.0, 
                  classic_guide_params_fn: Callable[[str], bool]=lambda name: False,
-                 sp_mcmc_crit='infl', num_mcmc_particles: int=0, num_mcmc_warmup:int=100, num_mcmc_updates:int=10,
+                 sp_mcmc_crit='infl', sp_mode='local',
+                 num_mcmc_particles: int=0, num_mcmc_warmup:int=100, num_mcmc_updates:int=10,
                  sampler_fn=NUTS, sampler_kwargs=None, mcmc_kwargs=None, **static_kwargs):
         assert sp_mcmc_crit == 'infl' or sp_mcmc_crit == 'rand'
+        assert sp_mode == 'local' or sp_mode == 'global'
         assert 0 <= num_mcmc_particles <= num_stein_particles
         self.model = model
         self.guide = guide
@@ -73,6 +83,7 @@ class SVGD:
         self.repulsion_temperature = repulsion_temperature
         self.classic_guide_params_fn = classic_guide_params_fn
         self.sp_mcmc_crit = sp_mcmc_crit
+        self.sp_mode = sp_mode
         self.num_mcmc_particles = num_mcmc_particles
         self.num_mcmc_warmup = num_mcmc_warmup
         self.num_mcmc_updates = num_mcmc_updates
@@ -145,6 +156,15 @@ class SVGD:
         res_grads = tree_map(lambda x: -x, {**classic_param_grads, **stein_param_grads})
         return -np.mean(loss), res_grads
 
+    def _score_sp_mcmc(self, rng_key, subset_idxs, stein_uparams, sp_mcmc_subset_uparams, classic_uparams,
+                       *args, **kwargs):
+        if self.sp_mode == 'local':
+            _, ksd = self._svgd_loss_and_grads(rng_key, {**sp_mcmc_subset_uparams, **classic_uparams}, *args, **kwargs)
+        else:
+            stein_uparams = {p: ops.index_update(v, subset_idxs, sp_mcmc_subset_uparams[:, mcmc_idx]) for p, v in stein_uparams.items() }
+            _, ksd = self._svgd_loss_and_grads(rng_key, {**stein_uparams, **classic_uparams}, *args, **kwargs)
+        return ksd
+
 
     def _sp_mcmc(self, rng_key, unconstr_params, *args, **kwargs):
         # 0. Separate classical and stein parameters
@@ -181,7 +201,12 @@ class SVGD:
         samples_subset_stein_params = self.mcmc.get_samples(group_by_chain=True)
         sss_uparams = self.uconstrain_fn(samples_subset_stein_params)
 
-        # TODO: Pick the ones with best KSD (should it be global or local?)
+        # 4. Select best MCMC iteration to update particles
+        scores = jax.vmap(lambda sss_uparam_i: self._score_sp_mcmc(mcmc_key, idxs, stein_uparams, sss_uparam_i, 
+                                                                   classic_uparams, *args, **kwargs), in_axes=1)(sss_uparams)
+        mcmc_idx = np.argmax(scores)
+        stein_uparams = {p: ops.index_update(v, idxs, sss_uparams[:, mcmc_idx]) for p, v in stein_uparams.items() }
+        return {**stein_uparams, **classic_uparams}
     
     def init(self, rng_key, *args, **kwargs):
         """
